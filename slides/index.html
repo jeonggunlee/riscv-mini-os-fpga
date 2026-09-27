@@ -1,0 +1,419 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Nexys A7-100T에서 동작하는 single-cycle RV32I SoC 설계 발표 자료">
+  <title>RV32I SoC — Verilog에서 FPGA까지</title>
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="lessons.css">
+</head>
+<body>
+  <main class="deck" aria-live="polite">
+    <section class="slide hero active" data-title="표지">
+      <div class="eyebrow">RISC-V · VERILOG HDL · FPGA · BARE METAL</div>
+      <div class="hero-grid">
+        <div>
+          <p class="kicker">오늘 만든 전체 시스템</p>
+          <h1>Single-cycle<br><span>RV32I SoC</span></h1>
+          <p class="lede">명령어 한 줄이 논리회로를 지나 Nexys A7-100T의 USB-UART 문자로 나타나기까지.</p>
+        </div>
+        <div class="chip" aria-label="RV32I 프로세서 개념도">
+          <div class="chip-label">RV32I</div>
+          <div class="chip-core">CORE<br><small>12.5 MHz</small></div>
+          <i class="pin p1"></i><i class="pin p2"></i><i class="pin p3"></i><i class="pin p4"></i>
+          <i class="pin p5"></i><i class="pin p6"></i><i class="pin p7"></i><i class="pin p8"></i>
+        </div>
+      </div>
+      <div class="hero-meta"><span>Nexys A7-100T</span><span>Vivado 2022.1</span><span>2026.09.27 업데이트</span></div>
+    </section>
+
+    <section class="slide" data-title="목표와 결과">
+      <header><span class="num">01</span><div><p class="overline">PROJECT OUTCOME</p><h2>오늘 도달한 지점</h2></div></header>
+      <div class="outcome-grid">
+        <article class="big-result"><strong>RV32I</strong><span>합성 가능한 single-cycle CPU</span></article>
+        <article><b>SoC</b><p>8 KiB memory · UART · timer · MMIO</p></article>
+        <article><b>Privilege</b><p>M-mode CSR · ECALL · MRET · timer IRQ</p></article>
+        <article><b>FPGA</b><p>xc7a100tcsg324-1 구현 및 bitstream 생성</p></article>
+        <article><b>Firmware</b><p>Assembly → ELF → BIN → HEX 자동 빌드</p></article>
+      </div>
+      <div class="success-line"><span class="pulse"></span> 최종 timing constraint 충족 · UART “Hello Nexys A7!” 이미지 포함</div>
+    </section>
+
+    <section class="slide" data-title="전체 구조">
+      <header><span class="num">02</span><div><p class="overline">SYSTEM VIEW</p><h2>소프트웨어에서 핀까지</h2></div></header>
+      <div class="flow vertical-flow">
+        <div><small>SOURCE</small><b>nexys_hello.S</b></div><span>GNU toolchain</span>
+        <div><small>IMAGE</small><b>ELF → BIN → HEX</b></div><span>$readmemh</span>
+        <div class="accent"><small>PROCESSOR</small><b>Single-cycle RV32I</b></div><span>memory-mapped I/O</span>
+        <div><small>SOC</small><b>Memory · UART · Timer</b></div><span>constraints + implementation</span>
+        <div><small>BOARD</small><b>Nexys A7-100T</b></div>
+      </div>
+      <aside class="side-note"><b>핵심 원칙</b><p>ISA는 소프트웨어가 보는 계약이고, single-cycle은 그 계약을 구현하는 첫 번째 microarchitecture다.</p></aside>
+    </section>
+
+    <section class="slide" data-title="Single-cycle 데이터패스">
+      <header><span class="num">03</span><div><p class="overline">MICROARCHITECTURE</p><h2>한 clock에 한 명령을 끝낸다</h2></div></header>
+      <div class="datapath">
+        <div class="node"><small>FETCH</small><b>PC</b><em>instruction memory</em></div><i>→</i>
+        <div class="node"><small>DECODE</small><b>Decoder</b><em>immediate generator</em></div><i>→</i>
+        <div class="node"><small>READ</small><b>Register File</b><em>rs1 · rs2</em></div><i>→</i>
+        <div class="node hot"><small>EXECUTE</small><b>ALU</b><em>branch · address</em></div><i>→</i>
+        <div class="node"><small>MEM / WB</small><b>Data + rd</b><em>load · result</em></div>
+      </div>
+      <div class="two-col lower">
+        <div class="callout"><b>장점</b><ul><li>상태와 제어 흐름이 직관적</li><li>파이프라인 hazard가 없음</li><li>교육·기능 검증에 적합</li></ul></div>
+        <div class="callout warning"><b>대가</b><ul><li>critical path가 한 cycle 전체를 통과</li><li>비동기식 memory read 필요</li><li>높은 clock과 BRAM 활용에 불리</li></ul></div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="지원 ISA">
+      <header><span class="num">04</span><div><p class="overline">INSTRUCTION SET</p><h2>구현한 RV32I 범위</h2></div></header>
+      <div class="isa-grid">
+        <article><span>R</span><b>Register ALU</b><code>ADD SUB SLL SLT SLTU<br>XOR SRL SRA OR AND</code></article>
+        <article><span>I</span><b>Immediate ALU</b><code>ADDI SLTI SLTIU XORI<br>ORI ANDI SLLI SRLI SRAI</code></article>
+        <article><span>M</span><b>Memory</b><code>LB LBU LH LHU LW<br>SB SH SW</code></article>
+        <article><span>B</span><b>Control flow</b><code>BEQ BNE BLT BGE<br>BLTU BGEU JAL JALR</code></article>
+        <article><span>U</span><b>Upper immediate</b><code>LUI AUIPC</code></article>
+        <article><span>S</span><b>System</b><code>CSRR* CSRR*I<br>ECALL MRET FENCE</code></article>
+      </div>
+      <p class="footnote">첫 버전의 의도적 제한: RV32C/A/M, U-mode, MMU, 정렬 위반·access fault·EBREAK trap은 미지원.</p>
+    </section>
+
+    <section class="slide" data-title="RTL 모듈">
+      <header><span class="num">05</span><div><p class="overline">RTL ORGANIZATION</p><h2>역할이 분리된 Verilog 모듈</h2></div></header>
+      <div class="module-tree">
+        <div class="root-card"><b>nexys_a7_top</b><small>board clock · reset · pins</small></div>
+        <div class="branch-grid">
+          <article><b>rv32_soc</b><small>address decode · memory · MMIO</small><div><span>rv32_core</span><span>simple_timer</span></div></article>
+          <article><b>uart_tx</b><small>115200-8-N-1 serializer</small><div><span>ready / valid</span><span>TX pin</span></div></article>
+          <article><b>rv32_core</b><small>PC · decode · control · datapath</small><div><span>rv32_alu</span><span>rv32_regfile</span><span>rv32_csr</span></div></article>
+        </div>
+      </div>
+      <div class="file-strip"><code>rtl/rv32_core.v</code><code>rtl/rv32_csr.v</code><code>rtl/rv32_soc.v</code><code>rtl/nexys_a7_top.v</code></div>
+    </section>
+
+    <section class="slide" data-title="명령 실행">
+      <header><span class="num">06</span><div><p class="overline">ONE INSTRUCTION</p><h2><code>sb gp, 0(ra)</code>는 어떻게 UART 문자가 되는가?</h2></div></header>
+      <ol class="timeline">
+        <li><span>1</span><div><b>Fetch</b><p>PC가 가리키는 <code>00308023</code>을 읽는다.</p></div></li>
+        <li><span>2</span><div><b>Decode</b><p>S-type, byte store, <code>rs1=x1</code>, <code>rs2=x3</code>.</p></div></li>
+        <li><span>3</span><div><b>Address</b><p>ALU가 <code>x1 + 0 = 0x1000_0000</code> 계산.</p></div></li>
+        <li><span>4</span><div><b>Bus write</b><p><code>wstrb=0001</code>, 하위 8비트가 MMIO로 전달.</p></div></li>
+        <li><span>5</span><div><b>Serialize</b><p>UART가 start + 8 data + stop bit를 D4 핀으로 송신.</p></div></li>
+      </ol>
+      <div class="formula">instruction → control signals → address/data bus → peripheral → physical pin</div>
+    </section>
+
+    <section class="slide" data-title="메모리 맵">
+      <header><span class="num">07</span><div><p class="overline">ADDRESS SPACE</p><h2>모든 주변장치를 주소로 다룬다</h2></div></header>
+      <div class="memory-layout">
+        <div class="memory-stack">
+          <div class="mem mmio"><b>0x1000_1004</b><span>mtimecmp low</span></div>
+          <div class="mem mmio"><b>0x1000_1000</b><span>mtime low</span></div>
+          <div class="mem uart"><b>0x1000_0004</b><span>UART ready</span></div>
+          <div class="mem uart"><b>0x1000_0000</b><span>UART TX data</span></div>
+          <div class="gap">unmapped</div>
+          <div class="mem ram"><b>0x0000_0000 – 0x0000_1FFF</b><span>8 KiB program + data RAM</span></div>
+        </div>
+        <div class="code-card"><small>SOFTWARE VIEW</small><pre><code>while (!UART_READY) { }
+UART_TX = 'A';
+
+// 결국 CPU에는
+lw  x4, 4(x1)
+sb  x3, 0(x1)</code></pre></div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="CSR와 Trap">
+      <header><span class="num">08</span><div><p class="overline">PRIVILEGED CONTROL</p><h2>Mini OS를 위한 최소 M-mode 기반</h2></div></header>
+      <div class="trap-layout">
+        <div class="csr-list">
+          <div><code>mstatus</code><span>전역 interrupt 상태</span></div>
+          <div><code>mie / mip</code><span>timer enable / pending</span></div>
+          <div><code>mtvec</code><span>trap handler 주소</span></div>
+          <div><code>mepc</code><span>복귀할 PC</span></div>
+          <div><code>mcause</code><span>exception/interrupt 원인</span></div>
+          <div><code>mscratch</code><span>handler용 임시 저장</span></div>
+        </div>
+        <div class="trap-flow">
+          <div>프로그램 실행</div><i>timer IRQ / ECALL</i>
+          <div class="accent">mepc ← PC<br>mcause ← 원인<br>PC ← mtvec</div><i>trap handler</i>
+          <div>OS 처리</div><i>MRET</i>
+          <div>PC ← mepc</div>
+        </div>
+      </div>
+      <p class="footnote">Timer interrupt cause는 <code>0x8000_0007</code>, M-mode ECALL cause는 <code>11</code>.</p>
+    </section>
+
+    <section class="slide" data-title="Timer와 Scheduler">
+      <header><span class="num">09</span><div><p class="overline">NEXT SOFTWARE LAYER</p><h2>이 하드웨어 위에 scheduler를 올리는 방법</h2></div></header>
+      <div class="scheduler">
+        <div class="task task-a"><b>Task A</b><span>AAAA…</span></div>
+        <div class="irq-arrow">mtime ≥ mtimecmp<br><strong>timer interrupt</strong></div>
+        <div class="context"><b>Trap handler</b><span>x1…x31 저장</span><span>현재 SP/PC 저장</span><span>다음 task 선택</span></div>
+        <div class="irq-arrow reverse">register 복원<br><strong>MRET</strong></div>
+        <div class="task task-b"><b>Task B</b><span>BBBB…</span></div>
+      </div>
+      <div class="milestones"><span class="done">✓ CPU/CSR</span><span class="done">✓ timer IRQ 회로</span><span>○ trap assembly</span><span>○ context switch</span><span>○ round-robin OS</span></div>
+    </section>
+
+    <section class="slide" data-title="Nexys A7 연결">
+      <header><span class="num">10</span><div><p class="overline">BOARD INTEGRATION</p><h2>Nexys A7-100T 실제 연결</h2></div></header>
+      <div class="board-layout">
+        <div class="board">
+          <div class="fpga">Artix-7<br><b>XC7A100T</b></div>
+          <span class="port clk">E3 · 100 MHz</span>
+          <span class="port rst">C12 · RESET_N</span>
+          <span class="port tx">D4 · USB-UART TX</span>
+          <div class="led-row">● ● ● ● ● ● ● ● ● ● ● ● ● ● ● ●</div>
+        </div>
+        <div class="clock-card">
+          <h3>Clock strategy</h3>
+          <div><b>100 MHz</b><span>UART transmitter</span></div>
+          <i>÷ 8 + BUFG</i>
+          <div class="accent"><b>12.5 MHz</b><span>single-cycle CPU + SoC</span></div>
+          <p>첫 100 MHz 구현은 critical path가 약 9.8 ns 부족했다. CPU clock을 낮춘 뒤 timing을 충족했다.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="UART 설계">
+      <header><span class="num">11</span><div><p class="overline">SERIAL OUTPUT</p><h2>115200-8-N-1 송신과 backpressure</h2></div></header>
+      <div class="uart-frame">
+        <div class="bit idle">IDLE<br>1</div><div class="bit start">START<br>0</div>
+        <div class="bit">D0</div><div class="bit">D1</div><div class="bit">D2</div><div class="bit">D3</div>
+        <div class="bit">D4</div><div class="bit">D5</div><div class="bit">D6</div><div class="bit">D7</div>
+        <div class="bit stop">STOP<br>1</div>
+      </div>
+      <div class="two-col lower">
+        <div class="callout"><b>시간 계산</b><p><code>100,000,000 / 115,200 = 868</code></p><p>각 bit를 약 868개의 FPGA clock 동안 유지한다.</p></div>
+        <div class="callout"><b>ready / valid</b><p>CPU는 <code>0x1000_0004</code>의 ready를 polling한다. 송신 중 새 문자가 유실되는 것을 막는다.</p></div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="펌웨어 빌드">
+      <header><span class="num">12</span><div><p class="overline">REPRODUCIBLE FIRMWARE</p><h2><code>make firmware</code> 한 번으로</h2></div></header>
+      <div class="toolchain-flow">
+        <div><b>.S</b><small>assembly</small></div><i>GCC + linker.ld</i>
+        <div><b>.ELF</b><small>symbols · sections</small></div><i>objcopy -O binary</i>
+        <div><b>.BIN</b><small>raw little-endian bytes</small></div><i>bin2hex.py</i>
+        <div class="accent"><b>.HEX</b><small>32-bit $readmemh words</small></div>
+      </div>
+      <pre class="terminal"><code>$ make firmware
+riscv64-unknown-elf-gcc -march=rv32i -mabi=ilp32 ...
+riscv64-unknown-elf-objcopy -O binary ...
+python3 scripts/bin2hex.py --max-bytes 8192 ...</code></pre>
+      <div class="endian"><span>binary bytes</span><code>b7 00 00 10</code><i>little endian</i><span>HEX word</span><code>100000b7</code></div>
+    </section>
+
+    <section class="slide" data-title="C 데모의 목표">
+      <header><span class="num">13</span><div><p class="overline">C END-TO-END DEMO</p><h2>C 코드가 정말 이 CPU에서 실행되는가?</h2></div></header>
+      <div class="lesson-grid">
+        <article><span>INPUT</span><h3>Freestanding C</h3><pre><code>for (i = 1; i &lt;= 10; ++i)
+    sum += i;</code></pre><p>표준 라이브러리와 운영체제 없이 실행한다.</p></article>
+        <article><span>MEMORY CHECK</span><h3>Signature = 55</h3><pre><code>*(uint32_t *)0x400
+    = sum;</code></pre><p>RAM 주소 0x400에 계산 결과를 남긴다.</p></article>
+        <article><span>I/O CHECK</span><h3>UART = “C OK\n”</h3><pre><code>while (!UART_READY) {}
+UART_TX = value;</code></pre><p>MMIO load/store와 byte lane을 함께 검증한다.</p></article>
+      </div>
+      <div class="formula">같은 실행에서 산술 + branch + RAM + UART를 모두 확인</div>
+    </section>
+
+    <section class="slide" data-title="ABI와 컴파일 옵션">
+      <header><span class="num">14</span><div><p class="overline">ISA vs ABI</p><h2>CPU의 명령 계약과 compiler의 사용 규칙</h2></div></header>
+      <div class="two-col abi-layout">
+        <div class="callout"><b>ISA · <code>-march=rv32i</code></b><p>CPU가 이해하는 명령과 encoding을 정한다.</p><ul><li>32-bit integer registers</li><li>ADD, LW, SW, BGEU, JAL…</li><li>compressed/M extension은 생성하지 않음</li></ul></div>
+        <div class="callout"><b>ABI · <code>-mabi=ilp32</code></b><p>compiler가 register와 자료형을 쓰는 규칙이다.</p><ul><li>int, long, pointer = 32 bit</li><li>a0–a7: 인자, a0–a1: 반환값</li><li>sp=x2, ra=x1 · 표준 stack 정렬 16 byte</li></ul></div>
+      </div>
+      <div class="register-map"><span><b>a3</b>x13 · 주소 base</span><span><b>a4</b>x14 · loop i</span><span><b>a5</b>x15 · sum</span><span><b>zero</b>x0 · 항상 0</span></div>
+      <p class="footnote">ABI 이름은 별칭이다. 예: <code>a5</code>와 <code>x15</code>는 동일한 물리 register다.</p>
+    </section>
+
+    <section class="slide" data-title="C에서 Assembly로">
+      <header><span class="num">15</span><div><p class="overline">COMPILER FRONT END</p><h2>첫 단계: C → compiler assembly</h2></div></header>
+      <div class="code-explain">
+        <pre><code>// firmware/c_demo.c
+for (i = 1; i &lt;= sum_limit; ++i)
+    sum += i;
+
+*signature = sum;</code></pre>
+        <pre><code># build/firmware/c_demo.s
+li    a4,1          # i = 1
+li    a5,0          # sum = 0
+lui   a3,%hi(.LANCHOR0)
+.L3:
+add   a5,a5,a4      # sum += i
+addi  a4,a4,1       # ++i
+addi  a2,a3,%lo(.LANCHOR0)
+lw    a2,0(a2)      # volatile limit
+bgeu  a2,a4,.L3
+sw    a5,1024(zero) # RAM[0x400]</code></pre>
+      </div>
+      <pre class="terminal"><code>make c-demo   # 프로젝트 Makefile의 전체 옵션으로 재현
+# 핵심: gcc -S → assembly 출력 / -O1 → 최적화 / -march=rv32i -mabi=ilp32</code></pre>
+    </section>
+
+    <section class="slide" data-title="Symbol과 Relocation">
+      <header><span class="num">16</span><div><p class="overline">ADDRESS RESOLUTION</p><h2><code>%hi</code>, <code>%lo</code>, <code>.LANCHOR0</code>의 의미</h2></div></header>
+      <div class="conversion-steps">
+        <div><small>ASSEMBLY SYMBOL</small><code>.LANCHOR0</code><p>GCC가 만든 <code>sum_limit</code> 주소 대표 symbol</p></div>
+        <i>linker.ld가 배치</i>
+        <div><small>FINAL ADDRESS</small><code>0x0000_0068</code><p>ELF에서 확정된 실제 byte address</p></div>
+      </div>
+      <div class="two-col lower">
+        <pre class="code-panel"><code>lui a5,%hi(.LANCHOR0)
+lw  a5,%lo(.LANCHOR0)(a5)</code></pre>
+        <pre class="code-panel"><code>lui x15,0x0
+lw  x15,104(x15)
+
+// Memory[0x68] → x15</code></pre>
+      </div>
+      <p class="footnote"><code>%lo</code>는 signed 12-bit 값이다. 하위 값이 음수이면 <code>%hi</code>가 이를 보정한다. 예: 0x1800 = (2 &lt;&lt; 12) + (−2048). 현재 0x68에는 보정이 필요 없다.</p>
+    </section>
+
+    <section class="slide" data-title="Assembly와 Disassembly">
+      <header><span class="num">17</span><div><p class="overline">PSEUDO vs REAL ISA</p><h2><code>.s</code>와 <code>.dis</code>가 다른 이유</h2></div></header>
+      <div class="compare-table">
+        <div class="table-head"><span>compiler assembly · c_demo.s</span><span>ELF disassembly · c_demo.dis</span></div>
+        <div><code>li a4,1</code><code>00100713 · addi x14,x0,1</code></div>
+        <div><code>beqz a5,.L2</code><code>02078263 · beq x15,x0,0x2c</code></div>
+        <div><code>j .L6</code><code>0000006f · jal x0,0x5c</code></div>
+        <div><code>sw a5,1024(zero)</code><code>40f02023 · sw x15,1024(x0)</code></div>
+      </div>
+      <div class="explain-band"><b>Assembler</b>는 pseudo instruction을 실제 명령으로 바꾸고, <b>Linker</b>는 symbol 주소를 확정하며, <b>objdump</b>는 ELF의 machine code를 다시 읽어 보여준다.</div>
+    </section>
+
+    <section class="slide" data-title="ELF에서 HEX까지">
+      <header><span class="num">18</span><div><p class="overline">IMAGE GENERATION</p><h2>실행 파일을 FPGA memory word로 바꾸기</h2></div></header>
+      <div class="conversion-steps four">
+        <div><small>LINK</small><b>c_demo.elf</b><p>section·symbol·주소 포함</p></div><i>objcopy</i>
+        <div><small>FLATTEN</small><b>c_demo.bin</b><p>순수 memory byte</p></div><i>bin2hex.py</i>
+        <div><small>PACK</small><b>c_demo.hex</b><p>little-endian 32-bit word</p></div>
+      </div>
+      <div class="byte-pack"><span>메모리 byte</span><code>b7 07 00 00</code><i>4 byte를 little-endian word로 묶기</i><code>000007b7</code><span>첫 instruction</span></div>
+      <pre class="terminal"><code>riscv64-unknown-elf-objcopy -O binary build/firmware/c_demo.elf build/firmware/c_demo.bin
+python3 scripts/bin2hex.py build/firmware/c_demo.bin firmware/c_demo.hex</code></pre>
+    </section>
+
+    <section class="slide" data-title="HEX 적재와 실행">
+      <header><span class="num">19</span><div><p class="overline">SIMULATION BOOT</p><h2>HEX가 CPU의 첫 instruction이 되기까지</h2></div></header>
+      <ol class="timeline compact">
+        <li><span>1</span><div><b>$readmemh</b><p><code>c_demo.hex</code>를 <code>mem[]</code>에 적재</p></div></li>
+        <li><span>2</span><div><b>Reset PC</b><p><code>pc = 0x00000000</code></p></div></li>
+        <li><span>3</span><div><b>Fetch</b><p><code>mem[pc&gt;&gt;2]</code> → instruction</p></div></li>
+        <li><span>4</span><div><b>Execute</b><p>RV32I single-cycle datapath</p></div></li>
+        <li><span>5</span><div><b>Check</b><p>RAM 0x400과 UART bytes 비교</p></div></li>
+      </ol>
+      <pre class="terminal"><code>$ make sim-c-demo
+PASS: C firmware signature=55, UART="C OK\n"</code></pre>
+      <p class="footnote">테스트벤치는 UART ready를 항상 1로 두고, 1000 cycle 뒤 RAM signature와 5개 출력 byte를 자동 판정한다.</p>
+    </section>
+
+    <section class="slide" data-title="VCD로 계산 관찰">
+      <header><span class="num">20</span><div><p class="overline">WAVEFORM DEBUG</p><h2>합계 계산부터 RAM 저장까지 눈으로 확인</h2></div></header>
+      <div class="waveform">
+        <div><b>sum_x15</b><span class="steps">0 ─ 1 ─ 3 ─ 6 ─ 10 ─ 15 ─ 21 ─ 28 ─ 36 ─ 45 ─ <em>55</em></span></div>
+        <div><b>loop_i_x14</b><span class="steps">1 ─ 2 ─ 3 ─ 4 ─ 5 ─ 6 ─ 7 ─ 8 ─ 9 ─ 10 ─ 11</span></div>
+        <div><b>signature_write</b><span class="digital">_____<i></i>‾‾‾<i></i>________________</span></div>
+        <div><b>signature_write_data</b><span><code>0x00000037</code> (signature_write=1인 구간)</span></div>
+        <div><b>signature_value</b><span><code>0x00000000</code> → <code>0x00000037</code></span></div>
+      </div>
+      <div class="signal-cards"><span><b>PC</b>0x2C</span><span><b>Address</b>0x400</span><span><b>Strobe</b>1111</span><span><b>Decimal</b>55</span></div>
+      <p class="footnote">계산 구간의 개념도이며 시간 축척은 생략했다. x15/x14는 이후 UART용으로 재사용된다. 결과가 유지되는 신호는 <code>signature_value</code>다.</p>
+    </section>
+
+    <section class="slide" data-title="Hello 펌웨어">
+      <header><span class="num">21</span><div><p class="overline">BARE-METAL PROGRAM</p><h2>Hello 프로그램의 실제 제어 흐름</h2></div></header>
+      <div class="code-explain">
+        <pre><code>lui  ra, 0x10000     # UART base
+li   sp, 0x100       # message
+loop:
+  lbu  gp, 0(sp)
+  beqz gp, done
+wait:
+  lw   tp, 4(ra)     # ready?
+  beqz tp, wait
+  sb   gp, 0(ra)     # transmit
+  addi sp, sp, 1
+  j    loop</code></pre>
+        <div class="explain-list">
+          <div><span>①</span><p>문자열은 linker image의 <code>0x100</code>에 배치</p></div>
+          <div><span>②</span><p>NUL 문자를 만날 때까지 한 byte씩 load</p></div>
+          <div><span>③</span><p>UART ready가 1일 때만 MMIO store</p></div>
+          <div><span>④</span><p>결과: <code>Hello Nexys A7!\r\n</code></p></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="Vivado 구현 결과">
+      <header><span class="num">22</span><div><p class="overline">IMPLEMENTATION REPORT</p><h2>합성에서 bitstream까지 검증</h2></div></header>
+      <div class="metrics">
+        <article><small>SETUP</small><strong>+3.850 <em>ns</em></strong><span>WNS</span></article>
+        <article><small>HOLD</small><strong>+0.139 <em>ns</em></strong><span>WHS</span></article>
+        <article><small>SLICE LUT</small><strong>4,614</strong><span>7.28%</span></article>
+        <article><small>REGISTERS</small><strong>1,372</strong><span>1.08%</span></article>
+      </div>
+      <div class="report-line"><span>✓ synthesis</span><span>✓ placement</span><span>✓ routing</span><span>✓ timing</span><span>✓ bitstream</span></div>
+      <div class="insight"><b>왜 BRAM 사용량은 0인가?</b><p>single-cycle CPU가 같은 cycle에 instruction/data를 조합식으로 읽고 byte write까지 요구한다. Vivado는 8 KiB 메모리를 dual-read distributed RAM으로 구현했다.</p></div>
+    </section>
+
+    <section class="slide" data-title="실행 방법">
+      <header><span class="num">23</span><div><p class="overline">RUNBOOK</p><h2>빌드하고 보드에서 확인하기</h2></div></header>
+      <div class="runbook">
+        <div><span>01</span><pre><code>make c-demo</code></pre><p>C → assembly → ELF → BIN → HEX</p></div>
+        <div><span>02</span><pre><code>make sim-c-demo</code></pre><p>CPU 실행, signature/UART/VCD 검증</p></div>
+        <div><span>03</span><pre><code>make vivado</code></pre><p>합성·배치·배선·bitstream 생성</p></div>
+        <div><span>04</span><pre><code>vivado -mode batch \
+ -source scripts/program_nexys_a7.tcl</code></pre><p>JTAG로 Nexys A7 프로그래밍</p></div>
+      </div>
+      <div class="artifact"><span>최종 산출물</span><code>build/vivado/nexys_a7_rv32i.bit</code></div>
+      <p class="footnote">01–02는 C 데모 시뮬레이션이다. 03–04의 기본 FPGA 이미지는 <code>nexys_hello.hex</code>이며 C 데모로 자동 교체되지 않는다.</p>
+    </section>
+
+    <section class="slide" data-title="검증과 한계">
+      <header><span class="num">24</span><div><p class="overline">ENGINEERING NOTES</p><h2>검증한 것, 아직 남은 것</h2></div></header>
+      <div class="two-col checklist">
+        <div><h3>검증 완료</h3><p>✓ Vivado RTL 분석 및 elaboration</p><p>✓ Nexys A7 synthesis / timing closure</p><p>✓ bitstream 생성</p><p>✓ C → assembly/ELF/BIN/HEX</p><p>✓ Icarus end-to-end simulation PASS</p><p>✓ VCD에서 signature=55 확인</p></div>
+        <div><h3>현재 한계</h3><p>○ 실제 보드 UART 관측은 사용자 단계</p><p>○ memory misalignment trap 미구현</p><p>○ UART RX 미구현</p><p>○ BRAM 친화적 구조가 아님</p><p>○ 상위 32-bit timer MMIO 미구현</p><p>○ OS context switch 코드는 다음 단계</p></div>
+      </div>
+    </section>
+
+    <section class="slide" data-title="다음 로드맵">
+      <header><span class="num">25</span><div><p class="overline">ROADMAP</p><h2>Mini OS까지 이어지는 경로</h2></div></header>
+      <div class="roadmap">
+        <div class="complete"><span>1</span><b>RV32I CPU</b><small>완료</small></div>
+        <div class="complete"><span>2</span><b>FPGA + UART</b><small>완료</small></div>
+        <div class="complete"><span>3</span><b>CSR + Timer</b><small>RTL 완료</small></div>
+        <div><span>4</span><b>Trap entry</b><small>startup.S</small></div>
+        <div><span>5</span><b>Context switch</b><small>register frame</small></div>
+        <div><span>6</span><b>Scheduler</b><small>round-robin</small></div>
+        <div><span>7</span><b>Syscall</b><small>write/yield/exit</small></div>
+        <div><span>8</span><b>Pipeline</b><small>hazard/cache</small></div>
+      </div>
+      <blockquote>“CPU가 명령어를 실행한다”에서 “운영체제가 시간을 나누어 준다”까지, 모든 계층을 직접 연결하는 프로젝트.</blockquote>
+    </section>
+
+    <section class="slide hero closing" data-title="마무리">
+      <div class="eyebrow">BUILD · OBSERVE · EXTEND</div>
+      <h2>작은 CPU가<br><span>하나의 컴퓨터</span>가 되었다.</h2>
+      <p>다음 목표: timer trap handler와 두 task의 실제 context switch.</p>
+      <div class="closing-command"><code>make firmware && make vivado</code></div>
+      <small>← / → 이동 · N 상세 해설 · R 전체 읽기 · P 인쇄</small>
+    </section>
+  </main>
+
+  <nav class="controls" aria-label="슬라이드 탐색">
+    <button id="prev" aria-label="이전 슬라이드">←</button>
+    <button id="overview" aria-label="전체 슬라이드 보기">▦</button>
+    <button id="notes" aria-label="상세 해설" aria-expanded="false">해설</button>
+    <button id="reading" aria-label="전체 읽기 모드" aria-pressed="false">읽기</button>
+    <button id="next" aria-label="다음 슬라이드">→</button>
+  </nav>
+  <div class="progress"><i id="progressBar"></i></div>
+  <div class="counter"><span id="current">01</span><i></i><span id="total">42</span></div>
+  <div id="overviewPanel" class="overview-panel" aria-hidden="true"></div>
+  <script src="lessons.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+# Tool downloads, firmware builds, FPGA implementation and hardware captures
+/build/
+/.Xil/
+*.log
+*.jou
+*.pb
+*.vcd
+*.wdb
+*.dcp
+*.bit
+*.ltx
+/tight_setup_hold_pins.txt
+
+# Python caches and local web-server state
+__pycache__/
+*.py[cod]
+*.pid
+
+# Local agent configuration, credentials and editor/system temporary files
+/.codex/
+/.agents/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store
+*~
+*.swp
