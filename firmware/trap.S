@@ -55,14 +55,14 @@ trap_entry:
     /* All registers are saved; t0 (x5) is free to use from here on. */
     addi t0, sp, 128
     sw   t0,    8(sp)            /* original sp, for debugging only */
-    csrr t0, mepc
+    csrr t0, mepc                /* save mepc in the frame */
     sw   t0,    0(sp)
 
-    mv   a0, sp
-    call trap_handler
+    mv   a0, sp                  /* a0 = frame to resume, which may be the same or a different task */
+    call trap_handler            /* <-- trap_handler may return a different task's frame in a0 */
     mv   sp, a0                  /* <-- context switch happens here */
 
-    lw   t0,    0(sp)
+    lw   t0,    0(sp)            /* restore mepc from the frame */
     csrw mepc, t0
     lw   x1,    4(sp)
     lw   x3,   12(sp)

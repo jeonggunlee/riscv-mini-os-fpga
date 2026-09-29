@@ -43,13 +43,16 @@ module rv32_soc #(
     // Core-facing instruction/data buses.
     wire [31:0] iaddr, daddr, dwdata;
     wire [3:0] dwstrb;  // write strobe: 4'b0001=byte0, 4'b0010=byte1, 4'b0100=byte2, 4'b1000=byte3
+
     localparam MEM_BYTES = MEM_WORDS * 4;
     wire imem_sel = (iaddr < MEM_BYTES);    // instruction fetch는 unified memory만 허용한다.
     wire dmem_sel = (daddr < MEM_BYTES);    // data access는 unified memory + MMIO를 허용한다.
+
     // instruction address는 byte address이므로 [15:2]로 word index를 만든다.
     // 범위 밖 fetch에는 ADDI x0,x0,0(NOP)을 반환해 X propagation을 막는다.
     wire [31:0] irdata = imem_sel ? mem[iaddr[15:2]] : 32'h0000_0013;
-    reg [31:0] drdata;
+    reg [31:0] drdata;  // data read mux output. MMIO는 아래에서 선택한다.
+
     // 0x1000_1xxx page 전체를 timer peripheral로 decode한다. Timer 내부에서는
     // address bit 2가 mtime과 mtimecmp를 선택한다.
     wire timer_sel = (daddr[31:12] == 20'h10001);
@@ -65,9 +68,9 @@ module rv32_soc #(
 
     // Data read mux. 선택되지 않은/unmapped address는 0을 반환한다.
     always @* begin
-        if (dmem_sel) drdata = mem[daddr[15:2]];
-        else if (daddr == 32'h1000_0004) drdata = {31'd0, uart_tx_ready};
-        else if (timer_sel) drdata = timer_rdata;
+        if (dmem_sel) drdata = mem[daddr[15:2]];                            // unified memory; MEM_WORDS가 실제 RAM 범위를 결정한다.
+        else if (daddr == 32'h1000_0004) drdata = {31'd0, uart_tx_ready};   // UART TX ready register
+        else if (timer_sel) drdata = timer_rdata;                           // Timer MMIO
         else drdata = 32'd0;
     end
 
@@ -94,10 +97,16 @@ module rv32_soc #(
 
     // Processor core. trap_taken은 현재 SoC 외부에서 사용하지 않아 open 처리한다.
     rv32_core cpu (
-        .clk(clk), .rst(rst), .imem_addr(iaddr), .imem_rdata(irdata),
-        .dmem_addr(daddr), .dmem_wdata(dwdata), .dmem_wstrb(dwstrb),
-        .dmem_rdata(drdata), .timer_irq(timer_irq), .debug_pc(debug_pc),
-        .trap_taken()
+        .clk(clk), .rst(rst),   // clock and reset
+        .imem_addr(iaddr),      // instruction fetch address
+        .imem_rdata(irdata),    // instruction fetch data
+        .dmem_addr(daddr),      // data access address
+        .dmem_wdata(dwdata),    // data write data
+        .dmem_wstrb(dwstrb),    // data write strobe. dwstrb[0] = byte0, dwstrb[1] = byte1, dwstrb[2] = byte2, dwstrb[3] = byte3
+        .dmem_rdata(drdata),    // data read data
+        .timer_irq(timer_irq),  // machine timer interrupt
+        .debug_pc(debug_pc),    // debug PC output for waveform inspection
+        .trap_taken()           // trap_taken output is not used in this SoC
     );
 endmodule
 

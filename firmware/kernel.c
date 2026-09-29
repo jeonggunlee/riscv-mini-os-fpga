@@ -24,21 +24,21 @@
 typedef unsigned int uint32_t;
 typedef unsigned char uint8_t;
 
-#define UART_TX      (*(volatile uint8_t  *)0x10000000u)
-#define UART_READY   (*(volatile uint32_t *)0x10000004u)
-#define MTIME_LO     (*(volatile uint32_t *)0x10001000u)
-#define MTIMECMP_LO  (*(volatile uint32_t *)0x10001004u)
+#define UART_TX      (*(volatile uint8_t  *)0x10000000u)    /* write-only. UART_TX is a byte-wide register, so the compiler must not generate 32-bit writes. */
+#define UART_READY   (*(volatile uint32_t *)0x10000004u)    /* read-only. UART_READY is a 32-bit register, so the compiler must not generate 8-bit reads. */
+#define MTIME_LO     (*(volatile uint32_t *)0x10001000u)    /* read-only. Only the low 32 bits of the 64-bit timer are memory-mapped. */
+#define MTIMECMP_LO  (*(volatile uint32_t *)0x10001004u)    /* read/write. Only the low 32 bits of the 64-bit timer are memory-mapped. */
 
-#ifndef TICK_CYCLES
+#ifndef TICK_CYCLES                  /* TICK_CYCLES is the timer period in CPU clocks */
 #define TICK_CYCLES 125000u          /* 10 ms at 12.5 MHz */
 #endif
 
 #define NTASK        4               /* idle + 3 tasks */
-#define STACK_WORDS  256             /* 1 KiB per task */
+#define STACK_WORDS  256             /* 1 KiB per task. The stack pointer is always aligned to 16 bytes, so the compiler can use aligned loads/stores for the frame. */
 
-#define CAUSE_ILLEGAL   2u
-#define CAUSE_ECALL_M   11u
-#define CAUSE_MTIMER    0x80000007u
+#define CAUSE_ILLEGAL   2u           /* illegal instruction */
+#define CAUSE_ECALL_M   11u          /* ecall from M-mode */
+#define CAUSE_MTIMER    0x80000007u  /* machine timer interrupt */
 
 /* Must match the frame layout in trap.S: mepc, then x1..x31. */
 struct frame {

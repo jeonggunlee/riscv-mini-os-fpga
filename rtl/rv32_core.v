@@ -32,21 +32,21 @@ module rv32_core #(
     input  wire        rst,
 
     // Combinational instruction-memory read port.
-    output wire [31:0] imem_addr,
-    input  wire [31:0] imem_rdata,
+    output wire [31:0] imem_addr,   // instruction fetch address
+    input  wire [31:0] imem_rdata,  // instruction fetch data
 
     // Combinational data-memory read / synchronous byte-enable write port.
-    output wire [31:0] dmem_addr,
-    output wire [31:0] dmem_wdata,
-    output wire [3:0]  dmem_wstrb,
-    input  wire [31:0] dmem_rdata,
+    output wire [31:0] dmem_addr,   // data memory address
+    output wire [31:0] dmem_wdata,  // data memory write data
+    output wire [3:0]  dmem_wstrb,  // data memory write strobe. 1 bit per byte. 어떤 byte lane이 유효한지 나타낸다. 0000이면 read-only/no-write이다.
+    input  wire [31:0] dmem_rdata,  // data memory read data
 
     // Level-sensitive machine timer interrupt request.
-    input  wire        timer_irq,
+    input  wire        timer_irq,   // timer interrupt request. CSR block이 irq_pending을 설정한다.
 
     // FPGA 관측 및 testbench 확인을 위한 debug 출력.
-    output wire [31:0] debug_pc,
-    output wire        trap_taken
+    output wire [31:0] debug_pc,    // 현재 instruction의 byte address
+    output wire        trap_taken   // trap이 발생하면 1. trap 진입 cycle에는 현재 instruction이 retire되지 않는다.
 );
     // rv32_alu.v와 공유하는 내부 ALU operation encoding.
     localparam ALU_ADD=4'd0, ALU_SUB=4'd1, ALU_SLL=4'd2, ALU_SLT=4'd3,
@@ -56,37 +56,45 @@ module rv32_core #(
     // -------------------------------------------------------------------------
     // Instruction fields and architectural state
     // -------------------------------------------------------------------------
-    reg [31:0] pc;                    // 현재 instruction의 byte address
-    wire [31:0] insn = imem_rdata;
+    reg [31:0] pc;                      // 현재 instruction의 byte address
+    wire [31:0] insn = imem_rdata;      // 현재 instruction
     wire [6:0] opcode = insn[6:0];
     wire [2:0] funct3 = insn[14:12];
     wire [6:0] funct7 = insn[31:25];
-    wire [4:0] rs1 = insn[19:15], rs2 = insn[24:20], rd = insn[11:7];
-    wire [31:0] rs1_data, rs2_data;   // register-file 조합식 read 결과
-    reg rd_we;                         // rising edge에서 rd를 쓸 때 1
-    reg [31:0] rd_data, next_pc;       // write-back 값과 다음 정상 PC
+    wire [4:0] rs1 = insn[19:15], rs2 = insn[24:20];
+    wire [4:0] rd = insn[11:7];         // register-file write address
+    wire [31:0] rs1_data, rs2_data;     // register-file 조합식 read 결과
+    reg rd_we;                          // rising edge에서 rd를 쓸 때 1
+    reg [31:0] rd_data, next_pc;        // write-back 값과 다음 정상 PC
 
     // ALU 입력과 operation 선택. alu_y는 조합식 결과다.
-    reg [3:0] alu_op;
-    reg [31:0] alu_a, alu_b;
-    wire [31:0] alu_y;
+    reg [3:0] alu_op;   // ALU operation 선택. rv32_alu.v와 공유하는 encoding
+    reg [31:0] alu_a;   // ALU operand A
+    reg [31:0] alu_b;   // ALU operand B
+    wire [31:0] alu_y;  // ALU combinational output
+
     // Data-memory 요청. write strobe가 0000이면 read-only/no-write이다.
     reg [31:0] daddr_r, dwdata_r;
     reg [3:0] dwstrb_r;
 
     // Decode 중 발견한 synchronous exception과 MRET 제어 신호.
-    reg illegal, exception, do_mret;
-    reg [31:0] exception_cause;
+    reg illegal;    // instruction[6:0] major opcode가 알 수 없는 경우 1. exception cause는 2.
+    reg exception;  // synchronous exception이 발생하면 1. exception cause는 decode에서 결정
+    reg do_mret;    // MRET instruction이 decode되면 1. CSR block이 mstatus를 복구하고 next PC는 mepc가 된다.
+    reg [31:0] exception_cause; // exception cause는 CSR block이 mcause에 기록한다.
 
     // CSR instruction의 write-back 요청과 새 CSR 값.
-    reg csr_we;
-    reg [11:0] csr_waddr;
-    reg [31:0] csr_wdata;
+    reg csr_we;     // CSR write enable. instruction[31:20]이 CSR 주소로 decode되면 1.
+    reg [11:0] csr_waddr;   // CSR write address. instruction[31:20]이 CSR 주소로 decode되면 1.
+    reg [31:0] csr_wdata;   // CSR write data. instruction[31:20]이 CSR 주소로 decode되면 1.
+
     // Address 하위 비트만큼 memory word를 이동시킨 byte/halfword load 값.
-    reg [31:0] load_shifted;
-    wire [31:0] csr_rdata, csr_mtvec, csr_mepc;
-    wire csr_valid;     // CSR read data가 유효하면 1. instruction[31:20]이 CSR 주소로 decode되면 1.
-    wire irq_pending;   // CSR block이 timer_irq를 보고 interrupt가 pending이면 1
+    reg [31:0] load_shifted;    // load instruction의 address[1:0]에 따라 dmem_rdata를 right shift한 값. LB/LH는 sign extension, LBU/LHU는 zero extension한다.
+    wire [31:0] csr_rdata;      // CSR read data. instruction[31:20]이 CSR 주소로 decode되면 1.
+    wire [31:0] csr_mtvec;      // CSR mtvec value. "trap" 진입 시 next PC가 된다.
+    wire [31:0] csr_mepc;       // CSR mepc value. MRET 시 next PC가 된다.
+    wire csr_valid;             // CSR read data가 유효하면 1. instruction[31:20]이 CSR 주소로 decode되면 1.
+    wire irq_pending;           // CSR block이 timer_irq를 보고 interrupt가 pending이면 1
 
     // Interrupt가 exception보다 우선한다. trap을 받는 cycle에는 현재 instruction이
     // retire되지 않으며 mepc에는 현재 pc가 저장된다.
@@ -110,7 +118,8 @@ module rv32_core #(
     rv32_regfile rf (
         .clk(clk), .rst(rst), .rs1_addr(rs1), .rs2_addr(rs2),
         .rs1_data(rs1_data), .rs2_data(rs2_data),
-        .rd_we(rd_we && !take_trap), .rd_addr(rd), .rd_data(rd_data)
+        .rd_we(rd_we && !take_trap),    // register write enable. take_trap gating은 faulting/interrupted instruction의 write-back을 막는다.
+        .rd_addr(rd), .rd_data(rd_data)
     );
 
     // ALU는 combinational으로 동작하며, ALU operation과 두 operand를 입력받아 결과를 출력한다.
@@ -119,12 +128,16 @@ module rv32_core #(
     // CSR block은 trap 진입 시 mepc/mcause/mstatus를 갱신하고, MRET 시 interrupt
     // enable을 복구한다. CSR 주소는 instruction[31:20]에 직접 들어 있다.
     rv32_csr csr (
-        .clk(clk), .rst(rst), .read_addr(insn[31:20]),
+        .clk(clk), .rst(rst),
+        .read_addr(insn[31:20]),        // CSR read address. instruction[31:20]이 CSR 주소로 decode되면 1.
         .read_data(csr_rdata), .read_valid(csr_valid),
         .write_en(csr_we && !take_trap), .write_addr(csr_waddr), .write_data(csr_wdata),
         .trap_enter(take_trap), .trap_pc(pc), .trap_cause(trap_cause),
-        .mret(do_mret && !take_trap), .timer_irq(timer_irq),
-        .irq_pending(irq_pending), .mtvec(csr_mtvec), .mepc(csr_mepc)
+        .mret(do_mret && !take_trap),   // MRET instruction이 decode되면 1. CSR block이 mstatus를 복구하고 next PC는 mepc가 된다.
+        .timer_irq(timer_irq),          // level-sensitive machine timer interrupt request
+        .irq_pending(irq_pending),      // CSR block이 timer_irq를 보고 interrupt가 pending이면 1
+        .mtvec(csr_mtvec),              // CSR mtvec value. "trap" 진입 시 next PC가 된다.
+        .mepc(csr_mepc)                 // CSR mepc value. MRET 시 next PC가 된다.
     );
 
     // -------------------------------------------------------------------------
@@ -145,34 +158,41 @@ module rv32_core #(
     // 경우는 PC+4, register/memory/CSR write 없음이다. 각 opcode case가 필요한
     // 제어와 결과만 override한다.
     always @* begin
-        rd_we = 1'b0; rd_data = 32'd0; next_pc = pc + 32'd4;
-        alu_op = ALU_ADD; alu_a = rs1_data; alu_b = rs2_data;
-        daddr_r = 32'd0; dwdata_r = 32'd0; dwstrb_r = 4'd0; load_shifted = 32'd0;
+        rd_we = 1'b0; rd_data = 32'd0;
+        next_pc = pc + 32'd4;
+        alu_op = ALU_ADD;
+        alu_a = rs1_data; alu_b = rs2_data;
+        daddr_r = 32'd0;
+        dwdata_r = 32'd0; dwstrb_r = 4'd0;
+        load_shifted = 32'd0;
         illegal = 1'b0; exception = 1'b0; exception_cause = 32'd0;
-        do_mret = 1'b0; csr_we = 1'b0; csr_waddr = insn[31:20]; csr_wdata = 32'd0;
+        do_mret = 1'b0; csr_we = 1'b0;
+        csr_waddr = insn[31:20]; csr_wdata = 32'd0;
 
+        // Instruction major opcode에 따라 instruction을 decode하고, register/CSR/memory write와 next PC를 결정한다.
         case (opcode)
             // U-type: upper immediate를 그대로 쓰거나 현재 PC에 더한다.
             7'b0110111: begin rd_we=1'b1; rd_data=imm_u(insn); end // LUI
             7'b0010111: begin rd_we=1'b1; rd_data=pc+imm_u(insn); end // AUIPC
 
             // JAL은 return address(PC+4)를 rd에 쓰고 PC-relative target으로 이동한다.
-            7'b1101111: begin rd_we=1'b1; rd_data=pc+4; next_pc=pc+imm_j(insn); end
+            7'b1101111: begin rd_we=1'b1; rd_data=pc+4; next_pc=pc+imm_j(insn); end // JAL
 
             // JALR target의 bit 0은 ISA 규칙에 따라 항상 0으로 만든다.
             7'b1100111: begin
                 if (funct3 != 3'b000) illegal=1'b1;
                 else begin rd_we=1'b1; rd_data=pc+4; next_pc=(rs1_data+imm_i(insn))&32'hffff_fffe; end
             end
+
             // Conditional branches. signed/unsigned 비교를 명시적으로 구분한다.
             7'b1100011: begin
                 case (funct3)
-                    3'b000: if (rs1_data == rs2_data) next_pc=pc+imm_b(insn);
-                    3'b001: if (rs1_data != rs2_data) next_pc=pc+imm_b(insn);
-                    3'b100: if ($signed(rs1_data) < $signed(rs2_data)) next_pc=pc+imm_b(insn);
-                    3'b101: if ($signed(rs1_data) >= $signed(rs2_data)) next_pc=pc+imm_b(insn);
-                    3'b110: if (rs1_data < rs2_data) next_pc=pc+imm_b(insn);
-                    3'b111: if (rs1_data >= rs2_data) next_pc=pc+imm_b(insn);
+                    3'b000: if (rs1_data == rs2_data) next_pc=pc+imm_b(insn);       // BEQ
+                    3'b001: if (rs1_data != rs2_data) next_pc=pc+imm_b(insn);       // BNE
+                    3'b100: if ($signed(rs1_data) < $signed(rs2_data)) next_pc=pc+imm_b(insn);       // BLT
+                    3'b101: if ($signed(rs1_data) >= $signed(rs2_data)) next_pc=pc+imm_b(insn);      // BGE
+                    3'b110: if (rs1_data < rs2_data) next_pc=pc+imm_b(insn);        // BLTU
+                    3'b111: if (rs1_data >= rs2_data) next_pc=pc+imm_b(insn);       // BGEU
                     default: illegal=1'b1;
                 endcase
             end
@@ -183,11 +203,11 @@ module rv32_core #(
                 daddr_r=rs1_data+imm_i(insn); rd_we=1'b1;
                 load_shifted=dmem_rdata >> (8*daddr_r[1:0]);
                 case (funct3)
-                    3'b000: rd_data={{24{load_shifted[7]}},load_shifted[7:0]};
-                    3'b001: rd_data={{16{load_shifted[15]}},load_shifted[15:0]};
-                    3'b010: rd_data=dmem_rdata;
-                    3'b100: rd_data={24'd0,load_shifted[7:0]};
-                    3'b101: rd_data={16'd0,load_shifted[15:0]};
+                    3'b000: rd_data={{24{load_shifted[7]}},load_shifted[7:0]};      // LB
+                    3'b001: rd_data={{16{load_shifted[15]}},load_shifted[15:0]};    // LH
+                    3'b010: rd_data=dmem_rdata;                                     // LW
+                    3'b100: rd_data={24'd0,load_shifted[7:0]};                      // LBU
+                    3'b101: rd_data={16'd0,load_shifted[15:0]};                     // LHU
                     default: begin illegal=1'b1; rd_we=1'b0; end
                 endcase
             end
@@ -196,9 +216,9 @@ module rv32_core #(
             7'b0100011: begin
                 daddr_r=rs1_data+imm_s(insn);
                 case (funct3)
-                    3'b000: begin dwstrb_r=4'b0001 << daddr_r[1:0]; dwdata_r={4{rs2_data[7:0]}}; end
-                    3'b001: begin dwstrb_r=4'b0011 << daddr_r[1:0]; dwdata_r={2{rs2_data[15:0]}}; end
-                    3'b010: begin dwstrb_r=4'b1111; dwdata_r=rs2_data; end
+                    3'b000: begin dwstrb_r=4'b0001 << daddr_r[1:0]; dwdata_r={4{rs2_data[7:0]}}; end    // SB
+                    3'b001: begin dwstrb_r=4'b0011 << daddr_r[1:0]; dwdata_r={2{rs2_data[15:0]}}; end   // SH
+                    3'b010: begin dwstrb_r=4'b1111; dwdata_r=rs2_data; end                              // SW
                     default: illegal=1'b1;
                 endcase
             end
@@ -207,13 +227,13 @@ module rv32_core #(
             7'b0010011: begin
                 rd_we=1'b1; alu_b=imm_i(insn);
                 case (funct3)
-                    3'b000: alu_op=ALU_ADD; 3'b010: alu_op=ALU_SLT;
-                    3'b011: alu_op=ALU_SLTU; 3'b100: alu_op=ALU_XOR;
-                    3'b110: alu_op=ALU_OR; 3'b111: alu_op=ALU_AND;
-                    3'b001: begin alu_op=ALU_SLL; if (funct7!=7'b0000000) illegal=1'b1; end
+                    3'b000: alu_op=ALU_ADD; 3'b010: alu_op=ALU_SLT;                 // SLTI
+                    3'b011: alu_op=ALU_SLTU; 3'b100: alu_op=ALU_XOR;                // XORI
+                    3'b110: alu_op=ALU_OR; 3'b111: alu_op=ALU_AND;                  // ORI, ANDI
+                    3'b001: begin alu_op=ALU_SLL; if (funct7!=7'b0000000) illegal=1'b1; end // SLLI
                     3'b101: begin
-                        if (funct7==7'b0000000) alu_op=ALU_SRL;
-                        else if (funct7==7'b0100000) alu_op=ALU_SRA;
+                        if (funct7==7'b0000000) alu_op=ALU_SRL;                     // SRLI
+                        else if (funct7==7'b0100000) alu_op=ALU_SRA;                // SRAI
                         else illegal=1'b1;
                     end
                 endcase
@@ -223,16 +243,16 @@ module rv32_core #(
             7'b0110011: begin
                 rd_we=1'b1;
                 case ({funct7,funct3})
-                    {7'b0000000,3'b000}: alu_op=ALU_ADD;
-                    {7'b0100000,3'b000}: alu_op=ALU_SUB;
-                    {7'b0000000,3'b001}: alu_op=ALU_SLL;
-                    {7'b0000000,3'b010}: alu_op=ALU_SLT;
-                    {7'b0000000,3'b011}: alu_op=ALU_SLTU;
-                    {7'b0000000,3'b100}: alu_op=ALU_XOR;
-                    {7'b0000000,3'b101}: alu_op=ALU_SRL;
-                    {7'b0100000,3'b101}: alu_op=ALU_SRA;
-                    {7'b0000000,3'b110}: alu_op=ALU_OR;
-                    {7'b0000000,3'b111}: alu_op=ALU_AND;
+                    {7'b0000000,3'b000}: alu_op=ALU_ADD;        // ADD
+                    {7'b0100000,3'b000}: alu_op=ALU_SUB;        // SUB
+                    {7'b0000000,3'b001}: alu_op=ALU_SLL;        // SLL
+                    {7'b0000000,3'b010}: alu_op=ALU_SLT;        // SLT
+                    {7'b0000000,3'b011}: alu_op=ALU_SLTU;       // SLTU
+                    {7'b0000000,3'b100}: alu_op=ALU_XOR;        // XOR
+                    {7'b0000000,3'b101}: alu_op=ALU_SRL;        // SRL
+                    {7'b0100000,3'b101}: alu_op=ALU_SRA;        // SRA
+                    {7'b0000000,3'b110}: alu_op=ALU_OR;         // OR
+                    {7'b0000000,3'b111}: alu_op=ALU_AND;        // AND
                     default: illegal=1'b1;
                 endcase
                 rd_data=alu_y; if (illegal) rd_we=1'b0;
@@ -251,7 +271,7 @@ module rv32_core #(
                     // ECALL from M-mode: synchronous exception cause 11.
                     if (insn == 32'h0000_0073) begin exception=1'b1; exception_cause=32'd11; end
                     // MRET: CSR block이 mstatus를 복구하고 next PC는 mepc가 된다.
-                    else if (insn == 32'h3020_0073) begin do_mret=1'b1; next_pc=csr_mepc; end
+                    else if (insn == 32'h3020_0073) begin do_mret=1'b1; next_pc=csr_mepc; end   // MRET
                     else illegal=1'b1;
                 end else begin
                     if (!csr_valid) illegal=1'b1;
@@ -259,13 +279,13 @@ module rv32_core #(
                         rd_we=1'b1; rd_data=csr_rdata;
                         case (funct3)
                             // CSRRW / CSRRS / CSRRC use rs1_data.
-                            3'b001: begin csr_we=1'b1; csr_wdata=rs1_data; end
-                            3'b010: begin csr_we=(rs1!=0); csr_wdata=csr_rdata|rs1_data; end
-                            3'b011: begin csr_we=(rs1!=0); csr_wdata=csr_rdata&~rs1_data; end
+                            3'b001: begin csr_we=1'b1; csr_wdata=rs1_data; end                  // CSRRW
+                            3'b010: begin csr_we=(rs1!=0); csr_wdata=csr_rdata|rs1_data; end    // CSRRS
+                            3'b011: begin csr_we=(rs1!=0); csr_wdata=csr_rdata&~rs1_data; end   // CSRRC
                             // Immediate variants use the encoded rs1 field as 5-bit zimm.
-                            3'b101: begin csr_we=1'b1; csr_wdata={27'd0,rs1}; end
-                            3'b110: begin csr_we=(rs1!=0); csr_wdata=csr_rdata|{27'd0,rs1}; end
-                            3'b111: begin csr_we=(rs1!=0); csr_wdata=csr_rdata&~{27'd0,rs1}; end
+                            3'b101: begin csr_we=1'b1; csr_wdata={27'd0,rs1}; end               // CSRRWI
+                            3'b110: begin csr_we=(rs1!=0); csr_wdata=csr_rdata|{27'd0,rs1}; end // CSRRSI
+                            3'b111: begin csr_we=(rs1!=0); csr_wdata=csr_rdata&~{27'd0,rs1}; end    // CSRRCI
                             default: begin illegal=1'b1; csr_we=1'b0; rd_we=1'b0; end
                         endcase
                     end
@@ -286,9 +306,9 @@ module rv32_core #(
     // Priority: reset > trap > normal sequential/branch/jump/MRET next_pc.
     // Register file, CSR, memory write도 같은 rising edge에서 commit된다.
     always @(posedge clk) begin
-        if (rst) pc <= RESET_PC;
-        else if (take_trap) pc <= csr_mtvec;
-        else pc <= next_pc;
+        if (rst) pc <= RESET_PC;                // reset 해제 후 최초로 fetch할 byte address. RESET_PC는 parameter로 설정된다.
+        else if (take_trap) pc <= csr_mtvec;    // trap 진입 시 next PC는 CSR mtvec가 된다. CSR block이 mepc/mcause/mstatus를 갱신하고, MRET 시 interrupt enable을 복구한다.
+        else pc <= next_pc;                     // 정상 instruction retire 시 next PC로 이동한다. branch/jump/MRET는 decode에서 next_pc를 계산한다.
     end
 endmodule
 
