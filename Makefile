@@ -1,4 +1,4 @@
-RTL := rtl/rv32_alu.v rtl/rv32_regfile.v rtl/rv32_csr.v rtl/rv32_core.v rtl/simple_timer.v rtl/rv32_soc.v
+RTL := rtl/rv32_alu.v rtl/rv32_regfile.v rtl/rv32_csr.v rtl/rv32_core.v rtl/simple_timer.v rtl/rv32_soc.v rtl/uart_rx.v
 CROSS ?= riscv64-unknown-elf
 RISCV_GCC := $(CROSS)-gcc
 RISCV_OBJCOPY := $(CROSS)-objcopy
@@ -88,7 +88,7 @@ clean:
 #   firmware/mini_os.hex            FPGA, MINI_OS_TICK cycles (10 ms at 12.5 MHz)
 #   build/firmware/mini_os_sim.hex  simulation, MINI_OS_SIM_TICK cycles
 MINI_OS_NAME := mini_os
-MINI_OS_SRCS := firmware/boot.S firmware/trap.S firmware/kernel.c
+MINI_OS_SRCS := firmware/boot.S firmware/trap.S firmware/kernel.c firmware/minifs.c
 MINI_OS_TICK ?= 125000
 MINI_OS_SIM_TICK ?= 2000
 MINI_OS_ELF := $(FW_BUILD)/$(MINI_OS_NAME).elf
@@ -103,11 +103,11 @@ MINI_OS_LDFLAGS := -mno-relax -nostdlib -nostartfiles \
 
 mini-os: $(MINI_OS_HEX) $(MINI_OS_DIS)
 
-$(MINI_OS_ELF): $(MINI_OS_SRCS) firmware/linker.ld | $(FW_BUILD)
+$(MINI_OS_ELF): $(MINI_OS_SRCS) firmware/minifs.h firmware/linker.ld | $(FW_BUILD)
 	$(RISCV_GCC) $(CFLAGS_RV32I) -DTICK_CYCLES=$(MINI_OS_TICK)u $(MINI_OS_LDFLAGS) \
 		-Wl,-Map=$(FW_BUILD)/$(MINI_OS_NAME).map -o $@ $(MINI_OS_SRCS)
 
-$(MINI_OS_SIM_ELF): $(MINI_OS_SRCS) firmware/linker.ld | $(FW_BUILD)
+$(MINI_OS_SIM_ELF): $(MINI_OS_SRCS) firmware/minifs.h firmware/linker.ld | $(FW_BUILD)
 	$(RISCV_GCC) $(CFLAGS_RV32I) -DTICK_CYCLES=$(MINI_OS_SIM_TICK)u $(MINI_OS_LDFLAGS) \
 		-Wl,-Map=$(FW_BUILD)/$(MINI_OS_NAME)_sim.map -o $@ $(MINI_OS_SRCS)
 
@@ -154,3 +154,50 @@ sim-zcu104: $(MINI_OS_SIM_HEX)
 # Opens UART before programming so the boot banner is not missed.
 test-zcu104:
 	$(PYTHON) scripts/test_zcu104_uart.py --program
+
+# Interactive shell image: 16 KiB program RAM and UART RX on ZCU104.
+SHELL_ELF := $(FW_BUILD)/mini_shell.elf
+SHELL_BIN := $(FW_BUILD)/mini_shell.bin
+SHELL_HEX := firmware/mini_shell.hex
+SHELL_SIM_ELF := $(FW_BUILD)/mini_shell_sim.elf
+SHELL_SIM_BIN := $(FW_BUILD)/mini_shell_sim.bin
+SHELL_SIM_HEX := $(FW_BUILD)/mini_shell_sim.hex
+.PHONY: mini-shell sim-shell vivado-zcu104-shell program-zcu104-shell test-zcu104-shell
+
+$(SHELL_ELF): $(MINI_OS_SRCS) firmware/minifs.h firmware/linker_shell.ld | $(FW_BUILD)
+	$(RISCV_GCC) $(CFLAGS_RV32I) -DSHELL_MODE -DTICK_CYCLES=125000u \
+		-mno-relax -nostdlib -nostartfiles -Wl,--build-id=none,--no-relax \
+		-T firmware/linker_shell.ld -o $@ $(MINI_OS_SRCS)
+
+$(SHELL_SIM_ELF): $(MINI_OS_SRCS) firmware/minifs.h firmware/linker_shell.ld | $(FW_BUILD)
+	$(RISCV_GCC) $(CFLAGS_RV32I) -DSHELL_MODE -DTICK_CYCLES=2000u \
+		-mno-relax -nostdlib -nostartfiles -Wl,--build-id=none,--no-relax \
+		-T firmware/linker_shell.ld -o $@ $(MINI_OS_SRCS)
+
+$(SHELL_BIN): $(SHELL_ELF)
+	$(RISCV_OBJCOPY) -O binary $< $@
+
+$(SHELL_SIM_BIN): $(SHELL_SIM_ELF)
+	$(RISCV_OBJCOPY) -O binary $< $@
+
+$(SHELL_HEX): $(SHELL_BIN) scripts/bin2hex.py
+	$(PYTHON) scripts/bin2hex.py --max-bytes 16384 $< $@
+
+$(SHELL_SIM_HEX): $(SHELL_SIM_BIN) scripts/bin2hex.py
+	$(PYTHON) scripts/bin2hex.py --max-bytes 16384 $< $@
+
+mini-shell: $(SHELL_HEX)
+
+sim-shell: $(SHELL_SIM_HEX)
+	bash scripts/run_shell_sim.sh
+
+vivado-zcu104-shell:
+	$(MAKE) -B mini-shell
+	mkdir -p build/zcu104_shell
+	SHELL_BUILD=1 vivado -mode batch -nojournal -log build/zcu104_shell/build.log -source scripts/build_zcu104.tcl
+
+program-zcu104-shell:
+	SHELL_BUILD=1 vivado -mode batch -nojournal -log build/zcu104_shell/program.log -source scripts/program_zcu104.tcl
+
+test-zcu104-shell:
+	$(PYTHON) scripts/test_zcu104_shell.py --program

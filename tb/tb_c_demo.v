@@ -53,6 +53,7 @@ module tb_c_demo;
         .clk(clk),
         .rst(rst),
         .uart_tx_ready(1'b1),
+        .uart_rx_data(8'd0), .uart_rx_valid(1'b0),
         .uart_tx_data(uart_data),
         .uart_tx_valid(uart_valid),
         .debug_pc(debug_pc)

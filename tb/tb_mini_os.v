@@ -12,8 +12,8 @@
 //     directions and a freshly created frame can be entered via mret,
 //   * the output alternates between tasks, i.e. preemption really happened.
 module tb_mini_os;
-    // Cycles to run after reset. ~2000-cycle ticks -> a few dozen slices.
-    localparam integer RUN_CYCLES = 80000;
+    // Allow the file-system demo task to finish despite timer preemption.
+    localparam integer RUN_CYCLES = 220000;
     localparam integer RX_MAX = 4096;
 
     reg clk = 1'b0;
@@ -56,6 +56,7 @@ module tb_mini_os;
         .clk(clk),
         .rst(rst),
         .uart_tx_ready(1'b1),
+        .uart_rx_data(8'd0), .uart_rx_valid(1'b0),
         .uart_tx_data(uart_data),
         .uart_tx_valid(uart_valid),
         .debug_pc(debug_pc)
@@ -68,6 +69,9 @@ module tb_mini_os;
     integer switches = 0;          // A/B/C -> different task letter
     reg [7:0] last_letter = 8'd0;
     integer timer_traps = 0, ecall_traps = 0, other_traps = 0;
+    integer fs_pass_seen = 0;
+    reg [8*13-1:0] fs_pass = "[MiniFS] PASS";
+    integer fs_match = 0;
     integer i;
 
     always @(posedge clk) begin
@@ -81,6 +85,14 @@ module tb_mini_os;
                 if (last_letter != 8'd0 && uart_data != last_letter)
                     switches <= switches + 1;
                 last_letter <= uart_data;
+            end
+            // A/B task output may appear between characters of the demo.
+            // Detect the final marker while ignoring these scheduler letters.
+            if (fs_match < 13 && uart_data == fs_pass[8*(12-fs_match) +: 8]) begin
+                fs_match <= fs_match + 1;
+                if (fs_match == 12) fs_pass_seen <= 1;
+            end else if (uart_data != "A" && uart_data != "B" && uart_data != "C") begin
+                fs_match <= 0;
             end
         end
         if (!rst && take_trap) begin
@@ -133,6 +145,10 @@ module tb_mini_os;
         end
         if (switches < 6) begin
             $display("FAIL: only %0d task switches visible on UART", switches);
+            $fatal;
+        end
+        if (!fs_pass_seen) begin
+            $display("FAIL: MiniFS demo did not complete");
             $fatal;
         end
 

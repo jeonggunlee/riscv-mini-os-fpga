@@ -6,11 +6,13 @@
 // CPU_RESET: SW20, active HIGH (unlike the Nexys A7 reset input).
 // UART_TX: C19 -> FT4232 channel D RX, 115200 8-N-1, no flow control.
 module zcu104_top #(
-    parameter MEM_HEX = "firmware/mini_os.hex"
+    parameter SHELL_MODE = 0,
+    parameter MEM_HEX = SHELL_MODE ? "firmware/mini_shell.hex" : "firmware/mini_os.hex"
 ) (
     input  wire CLK_300_P,
     input  wire CLK_300_N,
     input  wire CPU_RESET,
+    input  wire UART_RX,
     output wire UART_TX,
     output wire [3:0] LED
 );
@@ -44,11 +46,17 @@ module zcu104_top #(
     wire rst = reset_sync[3];
     wire valid, ready;
     wire [7:0] data;
+    wire rx_valid;
+    wire [7:0] rx_data;
     wire [31:0] pc;
 
-    rv32_soc #(.MEM_WORDS(2048), .MEM_HEX(MEM_HEX)) soc (
+    rv32_soc #(.MEM_WORDS(SHELL_MODE ? 4096 : 2048), .MEM_HEX(MEM_HEX)) soc (
         .clk(cpu_clk), .rst(rst), .uart_tx_ready(ready),
-        .uart_tx_data(data), .uart_tx_valid(valid), .debug_pc(pc)
+        .uart_tx_data(data), .uart_tx_valid(valid),
+        .uart_rx_data(rx_data), .uart_rx_valid(rx_valid), .debug_pc(pc)
+    );
+    uart_rx #(.CLOCK_HZ(12_500_000), .BAUD(115_200)) serial_rx (
+        .clk(cpu_clk), .rst(rst), .rx(UART_RX), .data(rx_data), .valid(rx_valid)
     );
     uart_tx #(.CLOCK_HZ(12_500_000), .BAUD(115_200)) serial (
         .clk(cpu_clk), .rst(rst), .valid(valid), .data(data),

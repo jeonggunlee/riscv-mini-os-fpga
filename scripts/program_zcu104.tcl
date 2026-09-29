@@ -1,7 +1,9 @@
 # Programs only volatile PL configuration, never flash or ARM firmware.
 # With multiple cables connected, require an explicit HW_TARGET filter.
 set root [file normalize [file join [file dirname [info script]] ..]]
-set bitfile [file join $root build zcu104 zcu104_mini_os.bit]
+set shell [info exists ::env(SHELL_BUILD)]
+set bitfile [file join $root build [expr {$shell ? "zcu104_shell" : "zcu104"}]]
+set bitfile [file join $bitfile [expr {$shell ? "zcu104_mini_shell.bit" : "zcu104_mini_os.bit"}]]
 if {![file exists $bitfile]} {error "Run make vivado-zcu104 first"}
 open_hw_manager
 connect_hw_server -url localhost:3121

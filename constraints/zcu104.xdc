@@ -10,6 +10,7 @@ create_generated_clock -name cpu_clk -source [get_ports CLK_300_P] \
 
 set_property -dict {PACKAGE_PIN M11 IOSTANDARD LVCMOS33} [get_ports CPU_RESET]
 set_property -dict {PACKAGE_PIN C19 IOSTANDARD LVCMOS18 SLEW SLOW DRIVE 8} [get_ports UART_TX]
+set_property -dict {PACKAGE_PIN A20 IOSTANDARD LVCMOS18} [get_ports UART_RX]
 set_property -dict {PACKAGE_PIN D5 IOSTANDARD LVCMOS33} [get_ports {LED[0]}]
 set_property -dict {PACKAGE_PIN D6 IOSTANDARD LVCMOS33} [get_ports {LED[1]}]
 set_property -dict {PACKAGE_PIN A5 IOSTANDARD LVCMOS33} [get_ports {LED[2]}]
@@ -18,4 +19,5 @@ set_property -dict {PACKAGE_PIN B5 IOSTANDARD LVCMOS33} [get_ports {LED[3]}]
 # Asynchronous pushbutton and human/baud-rate outputs have no external
 # synchronous capture clock. Do not cut ANY internal CPU or memory paths.
 set_false_path -from [get_ports CPU_RESET]
+set_false_path -from [get_ports UART_RX]
 set_false_path -to [get_ports {UART_TX LED[*]}]

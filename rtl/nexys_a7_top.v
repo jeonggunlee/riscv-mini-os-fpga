@@ -69,6 +69,7 @@ module nexys_a7_top (
         .MEM_HEX("firmware/nexys_hello.hex")
     ) soc (
         .clk(cpu_clk), .rst(cpu_rst), .uart_tx_ready(uart_ready),
+        .uart_rx_data(8'd0), .uart_rx_valid(1'b0),
         .uart_tx_data(uart_data), .uart_tx_valid(uart_valid), .debug_pc(debug_pc)
     );
 

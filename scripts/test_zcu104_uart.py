@@ -17,6 +17,19 @@ import termios
 import time
 
 
+def has_interleaved_marker(data: bytes, marker: bytes) -> bool:
+    """Ignore A/B/C task bytes inserted between MiniFS demo characters."""
+    pos = 0
+    for byte in data:
+        if byte == marker[pos]:
+            pos += 1
+            if pos == len(marker):
+                return True
+        elif byte not in b"ABC":
+            pos = 0
+    return False
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", help="/dev/serial/by-id/...-if03-port0 (PL UART)")
@@ -89,23 +102,26 @@ def main():
     body = data[start + len(banner):] if start >= 0 else data
     counts = Counter(body)
     transitions = sum(a != b for a, b in zip(body, body[1:]))
+    minifs_pass = has_interleaved_marker(body, b"[MiniFS] PASS")
+    valid_uart = all(ch == 10 or 32 <= ch <= 126 for ch in body)
     passed = (capture_error is None and start >= 0 and all(counts[ch] >= 3 for ch in b"ABC")
-              and transitions >= 6 and all(ch in b"ABC" for ch in body))
+              and transitions >= 6 and valid_uart and minifs_pass)
     result = dict(timestamp=time.strftime("%Y-%m-%dT%H:%M:%S%z"),
                   programmed=args.program,
                   bitstream_sha256=(hashlib.sha256(bitfile.read_bytes()).hexdigest()
                                     if args.program else None),
                   port=args.port, bytes=len(data), boot_banner=start >= 0,
                   task_counts={chr(ch): counts[ch] for ch in b"ABC"},
-                  task_transitions=transitions, error=capture_error, passed=passed)
+                  task_transitions=transitions, minifs_pass=minifs_pass,
+                  error=capture_error, passed=passed)
     (out / "uart_result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(bytes(data[:200]).decode("ascii", errors="backslashreplace"))
     print(json.dumps(result, indent=2))
     if not passed:
         if capture_error:
             print("Capture error:", capture_error)
-        raise SystemExit("FAIL: expected boot banner and interleaved A/B/C, no corrupt bytes")
-    print("PASS: real ZCU104 UART Mini OS boot and A/B/C task output")
+        raise SystemExit("FAIL: expected boot banner, MiniFS PASS, interleaved A/B/C, no corrupt bytes")
+    print("PASS: real ZCU104 UART Mini OS, MiniFS demo, and A/B/C task output")
 
 
 if __name__ == "__main__":

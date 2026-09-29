@@ -3,9 +3,12 @@
 **ZCU104 지원:** `make vivado-zcu104`로 Mini OS 비트스트림을 생성하고,
 `make test-zcu104`로 PL 다운로드 및 실제 USB UART 출력을 검사합니다.
 핀, 클럭, 테스트, 제한 사항은 [ZCU104 실행 안내](docs/ZCU104.md)를 참고하세요.
+입력 가능한 Mini Shell은 별도 이미지로 `make vivado-zcu104-shell`,
+`make test-zcu104-shell`을 사용합니다.
 
 교육용으로 만든 합성 가능한 단일 사이클 RISC-V 코어입니다. 벤더 IP 없이 작성했으며,
-코어와 간단한 64 KiB 메모리, UART 출력 레지스터, timer를 포함합니다.
+코어와 보드 구성 기준 8 KiB 프로그램/데이터 RAM, 8 KiB RAM disk,
+UART 출력 레지스터, timer를 포함합니다.
 
 ## 구성
 
@@ -16,6 +19,8 @@
 - `rtl/simple_timer.v`: `mtime`/`mtimecmp` 기반 timer interrupt
 - `tb/tb_rv32_core.v`: 산술, RAM, branch, UART smoke test
 - `firmware/boot.S`, `firmware/trap.S`, `firmware/kernel.c`: timer 선점 round-robin mini OS
+- `firmware/minifs.c`, `firmware/minifs.h`: RAM disk 기반 MiniFS
+- `docs/MINIFS.md`: 디스크 형식, API, syscall, 제한 사항
 - `docs/MANUAL.md` / `docs/MANUAL.pdf`: 개념부터 RTL, toolchain, 스크립트, mini OS까지의 상세 매뉴얼 (`make manual-pdf`로 PDF 재생성)
 
 지원 범위는 RV32I 정수 명령, `FENCE`(NOP 취급), CSR 명령, `ECALL`, `MRET`,
@@ -27,10 +32,12 @@ machine timer interrupt입니다. 압축 명령, 원자적 명령, MMU, U-mode�
 
 | 주소 | 기능 |
 |---|---|
-| `0x0000_0000`–`0x0000_FFFF` | 프로그램/데이터 BRAM |
+| `0x0000_0000`–`0x0000_1FFF` | Mini OS 프로그램/데이터 RAM (8 KiB); Mini Shell 이미지는 `0x3FFF`까지 16 KiB |
 | `0x1000_0000` | UART TX, 하위 8비트 쓰기 |
+| `0x1000_0004` | UART TX ready, bit 0 읽기 |
 | `0x1000_1000` | `mtime` 하위 32비트 |
 | `0x1000_1004` | `mtimecmp` 하위 32비트 |
+| `0x8010_0000`–`0x8010_1FFF` | MiniFS RAM disk (8 KiB) |
 
 ## 시뮬레이션
 
@@ -97,16 +104,17 @@ interrupt와 `ECALL`/`MRET` 위에서 도는 최소 OS입니다. `boot.S`가 스
 frame으로 저장한 뒤 `trap_handler()`가 돌려준 frame으로 `sp`를 바꿔 복원합니다
 (이 한 줄이 context switch). `kernel.c`는 `mtimecmp`를 재설정하고 idle, A, B, C 네
 슬롯을 round-robin으로 돌리며 `ecall`(a7 = 번호)로 `putc`/`yield`/`gettick`
-syscall을 제공합니다. task A/B는 선점될 때까지 문자를 출력하고 C는 한 글자 후
-`yield`합니다.
+syscall을 제공합니다. MiniFS용 `create`/`write`/`read`/`delete`/`list`
+서비스도 추가되었습니다. task A/B는 선점될 때까지 문자를 출력하고 task C는
+MiniFS 생성·기록·읽기·삭제 데모를 마친 후 한 글자씩 출력하며 `yield`합니다.
 
 ```bash
 make mini-os        # firmware/mini_os.hex (TICK_CYCLES=125000, 12.5 MHz에서 10 ms)
 make sim-mini-os    # 짧은 tick 이미지로 RTL 시뮬레이션, build/mini_os.vcd 생성
 ```
 
-시뮬레이션은 UART로 `mini OS boot` 다음 `AAAA…BBBB…C AAAA…` 패턴, timer trap
-35회, syscall 430회, 예상 밖 trap 0회를 확인하고 PASS를 출력합니다. FPGA에서
+시뮬레이션은 UART 부팅 메시지, MiniFS 데모 완료, A/B/C 스케줄링, timer IRQ와
+예상 밖 trap 0회를 확인하고 PASS를 출력합니다. FPGA에서
 실행하려면 `nexys_a7_top.v`의 `MEM_HEX`를 `firmware/mini_os.hex`로 바꾸고
 재합성합니다. timer MMIO가 하위 32비트만 노출하므로 약 343초 후에는 reset이
 필요합니다.

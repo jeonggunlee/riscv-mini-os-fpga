@@ -23,9 +23,12 @@
 
 typedef unsigned int uint32_t;
 typedef unsigned char uint8_t;
+#include "minifs.h"
 
 #define UART_TX      (*(volatile uint8_t  *)0x10000000u)    /* write-only. UART_TX is a byte-wide register, so the compiler must not generate 32-bit writes. */
 #define UART_READY   (*(volatile uint32_t *)0x10000004u)    /* read-only. UART_READY is a 32-bit register, so the compiler must not generate 8-bit reads. */
+#define UART_RX_DATA (*(volatile uint32_t *)0x10000008u)
+#define UART_RX_READY (*(volatile uint32_t *)0x1000000cu)
 #define MTIME_LO     (*(volatile uint32_t *)0x10001000u)    /* read-only. Only the low 32 bits of the 64-bit timer are memory-mapped. */
 #define MTIMECMP_LO  (*(volatile uint32_t *)0x10001004u)    /* read/write. Only the low 32 bits of the 64-bit timer are memory-mapped. */
 
@@ -33,7 +36,11 @@ typedef unsigned char uint8_t;
 #define TICK_CYCLES 125000u          /* 10 ms at 12.5 MHz */
 #endif
 
+#ifdef SHELL_MODE
+#define NTASK        2               /* idle + interactive shell */
+#else
 #define NTASK        4               /* idle + 3 tasks */
+#endif
 #define STACK_WORDS  256             /* 1 KiB per task. The stack pointer is always aligned to 16 bytes, so the compiler can use aligned loads/stores for the frame. */
 
 #define CAUSE_ILLEGAL   2u           /* illegal instruction */
@@ -50,7 +57,14 @@ struct frame {
 enum {
     SYS_PUTC    = 1,                 /* a0 = byte            */
     SYS_YIELD   = 2,                 /* give up the rest of the slice */
-    SYS_GETTICK = 3                  /* returns tick count in a0 */
+    SYS_GETTICK = 3,                 /* returns tick count in a0 */
+    SYS_FS_CREATE = 4,              /* a0=name */
+    SYS_FS_WRITE = 5,               /* a0=name, a1=data, a2=size */
+    SYS_FS_READ = 6,                /* a0=name, a1=buffer, a2=capacity */
+    SYS_FS_DELETE = 7,              /* a0=name */
+    SYS_FS_LIST = 8,                /* prints entries through UART */
+    SYS_GETC = 9,                   /* nonblocking UART RX; -1 if empty */
+    SYS_FS_READ_AT = 10            /* a0=name, a1=buffer, a2=capacity, a3=offset */
 };
 
 static struct frame *task_sp[NTASK];    /* saved stack pointer for each task */
@@ -79,7 +93,7 @@ static inline void csr_set_mstatus_mie(void)
 
 /* ----------------------------------------------------------------- UART */
 
-static void uart_putc(char c)
+static void uart_putc_raw(char c)
 {
     while ((UART_READY & 1u) == 0u) {
         /* transmitter busy */
@@ -87,10 +101,46 @@ static void uart_putc(char c)
     UART_TX = (uint8_t)c;
 }
 
+static void uart_putc(char c)
+{
+#ifdef SHELL_MODE
+    /* A terminal's LF may keep the current column; CR returns to column 0. */
+    if (c == '\n') uart_putc_raw('\r');
+#endif
+    uart_putc_raw(c);
+}
+
 static void uart_puts(const char *s)
 {
     while (*s != '\0')
         uart_putc(*s++);
+}
+
+// Print a 32-bit unsigned integer in decimal to the UART. This is used for the file size in the MiniFS demo.
+// It is not used for the tick count, which is printed in hexadecimal by panic().
+static void uart_put_u32(uint32_t n)
+{
+    static const uint32_t powers[] = {1000000000u, 100000000u, 10000000u,
+        1000000u, 100000u, 10000u, 1000u, 100u, 10u, 1u};
+    int i, started = 0;
+    for (i = 0; i < 10; i++) {
+        char digit = '0';
+        while (n >= powers[i]) { n -= powers[i]; digit++; }
+        if (digit != '0' || started || i == 9) {
+            uart_putc(digit);
+            started = 1;
+        }
+    }
+}
+
+// Print a file name and its size in bytes to the UART.
+// This is used by the MiniFS demo to show the contents of the file system.
+static void fs_emit(const char *name, uint32_t size)
+{
+    uart_puts(name);
+    uart_puts("  ");
+    uart_put_u32(size);
+    uart_puts(" bytes\n");
 }
 
 /* ---------------------------------------------------------------- timer */
@@ -106,8 +156,12 @@ static void timer_rearm(void)
 static struct frame *schedule(struct frame *f)
 {
     task_sp[cur] = f;                /* remember where this task's frame is */
+#ifdef SHELL_MODE
+    cur = 1;                        /* only shell task: do not idle for 10 ms */
+#else
     if (++cur >= NTASK)              /* no '%' : RV32I has no divider and   */
         cur = 0;                     /* libgcc is not linked                 */
+#endif
     return task_sp[cur];
 }
 
@@ -148,6 +202,31 @@ struct frame *trap_handler(struct frame *f)
             return schedule(f);
         case SYS_GETTICK:
             REG(f, 10) = ticks;
+            return f;
+        case SYS_FS_CREATE:
+            REG(f, 10) = (uint32_t)fs_create((const char *)REG(f, 10));
+            return f;
+        case SYS_FS_WRITE:
+            REG(f, 10) = (uint32_t)fs_write((const char *)REG(f, 10),
+                (const void *)REG(f, 11), REG(f, 12));
+            return f;
+        case SYS_FS_READ:
+            REG(f, 10) = (uint32_t)fs_read((const char *)REG(f, 10),
+                (void *)REG(f, 11), REG(f, 12));
+            return f;
+        case SYS_FS_DELETE:
+            REG(f, 10) = (uint32_t)fs_delete((const char *)REG(f, 10));
+            return f;
+        case SYS_FS_LIST:
+            fs_list(fs_emit);
+            REG(f, 10) = 0;
+            return f;
+        case SYS_GETC:
+            REG(f, 10) = (UART_RX_READY & 1u) ? UART_RX_DATA & 0xffu : (uint32_t)-1;
+            return f;
+        case SYS_FS_READ_AT:
+            REG(f, 10) = (uint32_t)fs_read_at((const char *)REG(f, 10),
+                (void *)REG(f, 11), REG(f, 12), REG(f, 13));
             return f;
         default:
             REG(f, 10) = (uint32_t)-1;
@@ -200,6 +279,126 @@ static void sys_yield(void)
     __asm__ volatile ("ecall" : : "r"(a7) : "memory");
 }
 
+static int sys_fs_call(uint32_t number, uint32_t arg0, uint32_t arg1, uint32_t arg2)
+{
+    register uint32_t a0 __asm__("a0") = arg0;
+    register uint32_t a1 __asm__("a1") = arg1;
+    register uint32_t a2 __asm__("a2") = arg2;
+    register uint32_t a7 __asm__("a7") = number;
+    __asm__ volatile ("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a7) : "memory");
+    return (int)a0;
+}
+
+static void sys_puts(const char *s)
+{
+    while (*s) sys_putc(*s++);
+}
+
+#ifdef SHELL_MODE
+static int sys_fs_read_at(const char *name, void *buf, uint32_t cap, uint32_t off)
+{
+    register uint32_t a0 __asm__("a0") = (uint32_t)name;
+    register uint32_t a1 __asm__("a1") = (uint32_t)buf;
+    register uint32_t a2 __asm__("a2") = cap;
+    register uint32_t a3 __asm__("a3") = off;
+    register uint32_t a7 __asm__("a7") = SYS_FS_READ_AT;
+    __asm__ volatile ("ecall" : "+r"(a0) : "r"(a1), "r"(a2), "r"(a3), "r"(a7) : "memory");
+    return (int)a0;
+}
+
+static int str_eq(const char *a, const char *b)
+{
+    while (*a && *a == *b) { a++; b++; }
+    return *a == *b;
+}
+
+static uint32_t str_len(const char *s)
+{
+    uint32_t n = 0;
+    while (s[n]) n++;
+    return n;
+}
+
+static char *word(char **cursor)
+{
+    char *p = *cursor, *start;
+    while (*p == ' ') p++;
+    start = p;
+    while (*p && *p != ' ') p++;
+    if (*p) *p++ = 0;
+    *cursor = p;
+    return start;
+}
+
+static void shell_command(char *line)
+{
+    char buf[64];
+    char *p = line, *cmd = word(&p), *name;
+    int n, i;
+    uint32_t off;
+    if (!*cmd) return;
+    if (str_eq(cmd, "help")) {
+        sys_puts("help ls cat <file> write <file> <text> rm <file>\n");
+    } else if (str_eq(cmd, "ls")) {
+        sys_fs_call(SYS_FS_LIST, 0, 0, 0);
+    } else if (str_eq(cmd, "cat")) {
+        name = word(&p);
+        if (!*name) { sys_puts("usage: cat <file>\n"); return; }
+        off = 0;
+        for (;;) {
+            n = sys_fs_read_at(name, buf, sizeof(buf), off);
+            if (n < 0) { sys_puts("file not found\n"); break; }
+            if (n == 0) { sys_putc('\n'); break; }
+            for (i = 0; i < n; i++) sys_putc(buf[i]);
+            off += (uint32_t)n;
+        }
+    } else if (str_eq(cmd, "write")) {
+        name = word(&p);
+        while (*p == ' ') p++;
+        if (!*name) { sys_puts("usage: write <file> <text>\n"); return; }
+        sys_fs_call(SYS_FS_CREATE, (uint32_t)name, 0, 0); // existing file: replace
+        n = sys_fs_call(SYS_FS_WRITE, (uint32_t)name, (uint32_t)p, str_len(p));
+        if (n < 0) sys_puts("write failed\n");
+        else { sys_puts("written\n"); }
+    } else if (str_eq(cmd, "rm")) {
+        name = word(&p);
+        if (!*name) { sys_puts("usage: rm <file>\n"); return; }
+        n = sys_fs_call(SYS_FS_DELETE, (uint32_t)name, 0, 0);
+        sys_puts(n == 0 ? "removed\n" : "file not found\n");
+    } else {
+        sys_puts("unknown command (help)\n");
+    }
+}
+
+static void task_shell(void)
+{
+    char line[96];
+    uint32_t used = 0;
+    int ch, overflow = 0, last_cr = 0;
+    sys_puts("Mini Shell ready. Type help.\nrv> ");
+    for (;;) {
+        ch = sys_fs_call(SYS_GETC, 0, 0, 0);
+        if (ch < 0) { sys_yield(); continue; }
+        if (ch == '\n' && last_cr) { last_cr = 0; continue; }
+        last_cr = (ch == '\r');
+        if (ch == '\r' || ch == '\n') {
+            sys_putc('\n');
+            if (overflow) sys_puts("line too long\n");
+            else { line[used] = 0; shell_command(line); }
+            used = 0; overflow = 0;
+            sys_puts("rv> ");
+        } else if (ch == 8 || ch == 127) {
+            if (used) { used--; sys_puts("\b \b"); }
+        } else if (ch >= 32 && ch <= 126) {
+            if (used < sizeof(line) - 1u && !overflow) {
+                line[used++] = (char)ch;
+                sys_putc((char)ch);
+            } else overflow = 1;
+        }
+    }
+}
+#else
+
 static void task_a(void)
 {
     for (;;)
@@ -215,22 +414,67 @@ static void task_b(void)
 /* Prints one character per turn, then hands the CPU back voluntarily. */
 static void task_c(void)
 {
+    static const char hello[] = "Hello RISC-V!\n";
+    char buffer[sizeof(hello)];
+    int size, i, ok;
+
+    sys_puts("\n[MiniFS] create/write/list/read/delete demo\n");
+    /* A CPU reset during an earlier demo may have left this test file. */
+    sys_fs_call(SYS_FS_DELETE, (uint32_t)"hello.txt", 0, 0);
+    if (sys_fs_call(SYS_FS_CREATE, (uint32_t)"hello.txt", 0, 0) == 0 &&
+        sys_fs_call(SYS_FS_WRITE, (uint32_t)"hello.txt", (uint32_t)hello,
+                    sizeof(hello) - 1u) == (int)sizeof(hello) - 1) {
+        sys_puts("ls:\n");
+        sys_fs_call(SYS_FS_LIST, 0, 0, 0);
+        size = sys_fs_call(SYS_FS_READ, (uint32_t)"hello.txt", (uint32_t)buffer,
+                           sizeof(buffer));
+        ok = (size == (int)sizeof(hello) - 1);
+        if (ok) {
+            sys_puts("cat hello.txt: ");
+            for (i = 0; i < size; i++) {
+                if (buffer[i] != hello[i]) ok = 0;
+                sys_putc(buffer[i]);
+            }
+        }
+        if (sys_fs_call(SYS_FS_DELETE, (uint32_t)"hello.txt", 0, 0) != 0)
+            ok = 0;
+        if (sys_fs_call(SYS_FS_READ, (uint32_t)"hello.txt", (uint32_t)buffer,
+                        sizeof(buffer)) != -1)
+            ok = 0;
+        sys_puts("rm hello.txt; ls:\n");
+        sys_fs_call(SYS_FS_LIST, 0, 0, 0);
+        sys_puts(ok ? "[MiniFS] PASS\n" : "[MiniFS] FAIL\n");
+    } else {
+        sys_puts("[MiniFS] FAIL\n");
+    }
     for (;;) {
         sys_putc('C');
         sys_yield();
     }
 }
+#endif
 
 /* --------------------------------------------------------------- kernel */
 
 void kernel_main(void)
 {
+    fs_init();                      /* format on first boot; preserve on CPU reset */
+#ifdef SHELL_MODE
+    task_create(1, task_shell);
+#else
     task_create(1, task_a);
     task_create(2, task_b);
     task_create(3, task_c);
+#endif
     cur = 0;                         /* we are the idle task, slot 0 */
 
-    uart_puts("mini OS boot\n");
+    uart_puts(
+#ifdef SHELL_MODE
+        "mini shell boot\n"
+#else
+        "mini OS boot\n"
+#endif
+    );
 
     timer_rearm();
     csr_write_mie(0x80u);            /* MTIE */
