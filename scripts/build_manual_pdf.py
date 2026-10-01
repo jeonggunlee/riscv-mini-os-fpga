@@ -175,7 +175,8 @@ def split_front_matter(md_text: str):
     return title, quote, body
 
 
-def build_html(md_text: str, page_of: dict) -> str:
+def build_html(md_text: str, page_of: dict, *, subtitle: str, board: str,
+               toolchain: str, source: str) -> str:
     title, quote, body = split_front_matter(md_text)
 
     md = markdown.Markdown(
@@ -220,13 +221,13 @@ def build_html(md_text: str, page_of: dict) -> str:
 </head><body>
 <section class="cover">
   <h1>{html.escape(title)}</h1>
-  <p class="sub">교육용 단일 사이클 RV32I 프로세서 · SoC · 펌웨어 toolchain · 빌드/시뮬레이션 스크립트 · Mini OS</p>
+  <p class="sub">{html.escape(subtitle)}</p>
   <dl>
     <dt>프로젝트</dt><dd>RISC-V/ (rtl, firmware, scripts, tb, constraints, docs)</dd>
-    <dt>대상 보드</dt><dd>Digilent Nexys A7-100T (xc7a100tcsg324-1), Vivado 2022.1</dd>
-    <dt>Toolchain</dt><dd>riscv64-unknown-elf-gcc 9.3.0 (-march=rv32i -mabi=ilp32), Icarus Verilog</dd>
+    <dt>대상 보드</dt><dd>{html.escape(board)}</dd>
+    <dt>Toolchain</dt><dd>{html.escape(toolchain)}</dd>
     <dt>생성일</dt><dd>{today}</dd>
-    <dt>원본</dt><dd>docs/MANUAL.md (scripts/build_manual_pdf.py로 생성)</dd>
+    <dt>원본</dt><dd>{html.escape(source)} (scripts/build_manual_pdf.py로 생성)</dd>
   </dl>
   <div class="note">{quote_html}</div>
 </section>
@@ -249,6 +250,7 @@ def chrome_binary():
 def render_pdf(html_path: Path, pdf_path: Path):
     cmd = [
         chrome_binary(), "--headless=new", "--disable-gpu", "--no-sandbox",
+        f"--user-data-dir={html_path.parent / 'chrome-profile'}", "--no-first-run",
         "--no-pdf-header-footer", "--run-all-compositor-stages-before-draw",
         "--virtual-time-budget=10000",
         f"--print-to-pdf={pdf_path}", html_path.as_uri(),
@@ -328,11 +330,21 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--md", default=PROJECT_DIR / "docs" / "MANUAL.md", type=Path)
     ap.add_argument("--pdf", default=PROJECT_DIR / "docs" / "MANUAL.pdf", type=Path)
-    ap.add_argument("--keep-html", action="store_true", help="also write docs/MANUAL.html")
+    ap.add_argument("--keep-html", action="store_true", help="also write HTML beside the PDF")
+    ap.add_argument("--subtitle", default="교육용 단일 사이클 RV32I 프로세서 · SoC · 펌웨어 toolchain · 빌드/시뮬레이션 스크립트 · Mini OS")
+    ap.add_argument("--board", default="Digilent Nexys A7-100T (xc7a100tcsg324-1), Vivado 2022.1")
+    ap.add_argument("--toolchain", default="riscv64-unknown-elf-gcc 9.3.0 (-march=rv32i -mabi=ilp32), Icarus Verilog")
+    ap.add_argument("--footer-title", help="short title for the printed footer")
     args = ap.parse_args()
 
     md_text = args.md.read_text(encoding="utf-8")
     title = md_text.splitlines()[0].lstrip("# ").strip()
+    try:
+        source = str(args.md.resolve().relative_to(PROJECT_DIR))
+    except ValueError:
+        source = str(args.md)
+    cover = dict(subtitle=args.subtitle, board=args.board,
+                 toolchain=args.toolchain, source=source)
 
     try:
         import fitz  # noqa: F401
@@ -346,14 +358,14 @@ def main():
         html_path = tmp / "manual.html"
         # Pass 1: render without page numbers, measure where each heading lands.
         page_of = {}
-        html_path.write_text(build_html(md_text, page_of), encoding="utf-8")
+        html_path.write_text(build_html(md_text, page_of, **cover), encoding="utf-8")
         render_pdf(html_path, args.pdf)
         if have_fitz:
             page_of = heading_pages(args.pdf, md_text)
             # Pass 2: same layout (TOC entries keep their line count), numbers filled in.
-            html_path.write_text(build_html(md_text, page_of), encoding="utf-8")
+            html_path.write_text(build_html(md_text, page_of, **cover), encoding="utf-8")
             render_pdf(html_path, args.pdf)
-            stamp_page_numbers(args.pdf, title)
+            stamp_page_numbers(args.pdf, args.footer_title or title)
         if args.keep_html:
             shutil.copy(html_path, args.pdf.with_suffix(".html"))
     print(f"wrote {args.pdf}")

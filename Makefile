@@ -136,6 +136,15 @@ sim-mini-os: $(MINI_OS_SIM_HEX)
 manual-pdf:
 	$(PYTHON) scripts/build_manual_pdf.py
 
+.PHONY: shell-guide-pdf
+shell-guide-pdf:
+	$(PYTHON) scripts/build_manual_pdf.py --md docs/SHELL_BINARY_GUIDE.md \
+		--pdf docs/SHELL_BINARY_GUIDE.pdf \
+		--subtitle "확장판 · RV32I ISA와 데이터패스 · SHELL_MODE · UART · syscall · MiniFS · 앱 실행" \
+		--board "AMD ZCU104 (xczu7ev-ffvc1156-2-e), PL RISC-V 12.5 MHz" \
+		--toolchain "RISC-V GNU Toolchain (-march=rv32i -mabi=ilp32), Vivado, Icarus Verilog" \
+		--footer-title "RISC-V Mini Shell과 바이너리 실행"
+
 # ZCU104 keeps the same 12.5 MHz CPU/timer clock as Nexys A7.
 # Force firmware compilation here so TICK_CYCLES cannot be stale after a
 # previous make invocation with a different MINI_OS_TICK value.
@@ -155,7 +164,7 @@ sim-zcu104: $(MINI_OS_SIM_HEX)
 test-zcu104:
 	$(PYTHON) scripts/test_zcu104_uart.py --program
 
-# Interactive shell image: 16 KiB program RAM and UART RX on ZCU104.
+# Interactive shell image: 32 KiB program RAM, reserved app window, UART RX.
 SHELL_ELF := $(FW_BUILD)/mini_shell.elf
 SHELL_BIN := $(FW_BUILD)/mini_shell.bin
 SHELL_HEX := firmware/mini_shell.hex
@@ -163,6 +172,23 @@ SHELL_SIM_ELF := $(FW_BUILD)/mini_shell_sim.elf
 SHELL_SIM_BIN := $(FW_BUILD)/mini_shell_sim.bin
 SHELL_SIM_HEX := $(FW_BUILD)/mini_shell_sim.hex
 .PHONY: mini-shell sim-shell vivado-zcu104-shell program-zcu104-shell test-zcu104-shell
+
+APP_ELF := $(FW_BUILD)/hello_app.elf
+APP_BIN := $(FW_BUILD)/hello_app.bin
+APP_HEX := $(FW_BUILD)/hello_app.hex
+.PHONY: hello-app
+
+$(APP_ELF): firmware/hello_app.c firmware/app.ld | $(FW_BUILD)
+	$(RISCV_GCC) $(CFLAGS_RV32I) -mno-relax -nostdlib -nostartfiles \
+		-Wl,--build-id=none,--no-relax -T firmware/app.ld -o $@ firmware/hello_app.c
+
+$(APP_BIN): $(APP_ELF)
+	$(RISCV_OBJCOPY) -O binary $< $@
+
+$(APP_HEX): $(APP_BIN) scripts/bin2hex.py
+	$(PYTHON) scripts/bin2hex.py --max-bytes 8192 $< $@
+
+hello-app: $(APP_BIN) $(APP_HEX)
 
 $(SHELL_ELF): $(MINI_OS_SRCS) firmware/minifs.h firmware/linker_shell.ld | $(FW_BUILD)
 	$(RISCV_GCC) $(CFLAGS_RV32I) -DSHELL_MODE -DTICK_CYCLES=125000u \
@@ -181,14 +207,14 @@ $(SHELL_SIM_BIN): $(SHELL_SIM_ELF)
 	$(RISCV_OBJCOPY) -O binary $< $@
 
 $(SHELL_HEX): $(SHELL_BIN) scripts/bin2hex.py
-	$(PYTHON) scripts/bin2hex.py --max-bytes 16384 $< $@
+	$(PYTHON) scripts/bin2hex.py --max-bytes 32768 $< $@
 
 $(SHELL_SIM_HEX): $(SHELL_SIM_BIN) scripts/bin2hex.py
-	$(PYTHON) scripts/bin2hex.py --max-bytes 16384 $< $@
+	$(PYTHON) scripts/bin2hex.py --max-bytes 32768 $< $@
 
 mini-shell: $(SHELL_HEX)
 
-sim-shell: $(SHELL_SIM_HEX)
+sim-shell: $(SHELL_SIM_HEX) $(APP_HEX)
 	bash scripts/run_shell_sim.sh
 
 vivado-zcu104-shell:
@@ -201,3 +227,8 @@ program-zcu104-shell:
 
 test-zcu104-shell:
 	$(PYTHON) scripts/test_zcu104_shell.py --program
+
+.PHONY: test-zcu104-app
+test-zcu104-app: hello-app
+	$(MAKE) test-zcu104-shell
+	$(PYTHON) scripts/upload_app.py --file $(APP_BIN) --name hello.app --run

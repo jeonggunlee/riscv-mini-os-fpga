@@ -11,9 +11,10 @@ else
     IVERILOG=("$LOCAL_ROOT/usr/bin/iverilog" -B "$IVL_LIB")
     VVP=("$LOCAL_ROOT/usr/bin/vvp" -M "$IVL_LIB")
 fi
-"${IVERILOG[@]}" -g2012 -Wall -s tb_shell -o build/tb_shell \
+APP_BYTES=$(wc -c < build/firmware/hello_app.bin)
+"${IVERILOG[@]}" -g2012 -Wall -DAPP_BYTES="$APP_BYTES" -s tb_shell -o build/tb_shell \
     rtl/rv32_alu.v rtl/rv32_regfile.v rtl/rv32_csr.v rtl/rv32_core.v \
     rtl/simple_timer.v rtl/rv32_soc.v rtl/uart_rx.v tb/tb_shell.v
 SIM_OUTPUT="$("${VVP[@]}" build/tb_shell)"
 printf '%s\n' "$SIM_OUTPUT"
-[[ "$SIM_OUTPUT" == *"PASS: UART RX, shell write/cat/ls/rm"* ]]
+[[ "$SIM_OUTPUT" == *"PASS: UART RX, MiniFS upload, CPU app fetch/execute/return"* ]]

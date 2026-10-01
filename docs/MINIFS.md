@@ -2,7 +2,7 @@
 
 현재 Mini OS는 별도의 8 KiB RAM disk를 `0x8010_0000`에 매핑합니다. 이 주소는
 기존 Mini OS의 코드·스택용 8 KiB RAM(0x0000_0000–0x0000_1FFF) 및
-Mini Shell의 16 KiB RAM(0x0000_0000–0x0000_3FFF)과 겹치지 않습니다.
+Mini Shell의 32 KiB RAM(0x0000_0000–0x0000_7FFF)과 겹치지 않습니다.
 RISC-V 코어는 일반 `LB`/`SB`/`LW`/`SW`로 접근하고, `rv32_soc.v`가 주소를
 RAM disk 배열로 연결합니다. 현재 구현은 조합식 읽기를 위해 FPGA의
 distributed RAM을 사용합니다.

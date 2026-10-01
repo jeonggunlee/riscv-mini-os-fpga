@@ -5,6 +5,13 @@
 핀, 클럭, 테스트, 제한 사항은 [ZCU104 실행 안내](docs/ZCU104.md)를 참고하세요.
 입력 가능한 Mini Shell은 별도 이미지로 `make vivado-zcu104-shell`,
 `make test-zcu104-shell`을 사용합니다.
+고정 주소 RV32I 앱을 MiniFS에 업로드해 `run`으로 실행하는 최소 버전은
+[앱 로더 안내](docs/APP_LOADER.md)를 참고하세요.
+Shell mode와 바이너리 실행을 프로세서·OS 관점에서 학습하는 교재는
+[상세 기술 문서](docs/SHELL_BINARY_GUIDE.md) / [인쇄용 PDF](docs/SHELL_BINARY_GUIDE.pdf)에 있습니다.
+현재 코어의 46개 명령·데이터패스·CSR, 실제 실행 추적, 메모리·스택 배치,
+실습 절차, 연습문제 35개와 해설을 포함하며
+`make shell-guide-pdf`로 PDF를 다시 생성합니다.
 
 교육용으로 만든 합성 가능한 단일 사이클 RISC-V 코어입니다. 벤더 IP 없이 작성했으며,
 코어와 보드 구성 기준 8 KiB 프로그램/데이터 RAM, 8 KiB RAM disk,
@@ -32,7 +39,7 @@ machine timer interrupt입니다. 압축 명령, 원자적 명령, MMU, U-mode�
 
 | 주소 | 기능 |
 |---|---|
-| `0x0000_0000`–`0x0000_1FFF` | Mini OS 프로그램/데이터 RAM (8 KiB); Mini Shell 이미지는 `0x3FFF`까지 16 KiB |
+| `0x0000_0000`–`0x0000_1FFF` | Mini OS 프로그램/데이터 RAM (8 KiB); Mini Shell 이미지는 `0x7FFF`까지 32 KiB |
 | `0x1000_0000` | UART TX, 하위 8비트 쓰기 |
 | `0x1000_0004` | UART TX ready, bit 0 읽기 |
 | `0x1000_1000` | `mtime` 하위 32비트 |

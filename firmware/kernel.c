@@ -295,6 +295,12 @@ static void sys_puts(const char *s)
 }
 
 #ifdef SHELL_MODE
+#define APP_BASE          0x00004000u
+#define APP_WINDOW_BYTES  8192u
+#define APP_MAGIC         0x31505041u /* "APP1" little-endian */
+#define APP_HEADER_BYTES  12u
+#define APP_MAX_BYTES     ((FS_BLOCK_COUNT - 3u) * FS_BLOCK_SIZE - APP_HEADER_BYTES)
+
 static int sys_fs_read_at(const char *name, void *buf, uint32_t cap, uint32_t off)
 {
     register uint32_t a0 __asm__("a0") = (uint32_t)name;
@@ -330,6 +336,119 @@ static char *word(char **cursor)
     return start;
 }
 
+static int hex_digit(int ch)
+{
+    if (ch >= '0' && ch <= '9') return ch - '0';
+    if (ch >= 'a' && ch <= 'f') return ch - 'a' + 10;
+    if (ch >= 'A' && ch <= 'F') return ch - 'A' + 10;
+    return -1;
+}
+
+static int parse_size(const char *s, uint32_t *value)
+{
+    uint32_t n = 0;
+    if (!*s) return 0;
+    while (*s) {
+        if (*s < '0' || *s > '9') return 0;
+        n = n * 10u + (uint32_t)(*s++ - '0');
+        if (n > APP_MAX_BYTES) return 0;
+    }
+    if (!n) return 0;
+    *value = n;
+    return 1;
+}
+
+static int parse_checksum(const char *s, uint32_t *value)
+{
+    uint32_t n = 0;
+    int i, d;
+    for (i = 0; i < 8; i++) {
+        if (!s[i]) return 0;
+        d = hex_digit((unsigned char)s[i]);
+        if (d < 0) return 0;
+        n = (n << 4) | (uint32_t)d;
+    }
+    if (s[8]) return 0;
+    *value = n;
+    return 1;
+}
+
+/* ASCII-hex transfer keeps the UART protocol simple and inspectable. */
+static int receive_hex_byte(void)
+{
+    int hi = -1, lo, ch;
+    for (;;) {
+        ch = sys_fs_call(SYS_GETC, 0, 0, 0);
+        if (ch < 0) { sys_yield(); continue; }
+        if (ch == ' ' || ch == '\r' || ch == '\n' || ch == '\t') continue;
+        hi = hex_digit(ch);
+        break;
+    }
+    if (hi < 0) return -1;
+    for (;;) {
+        ch = sys_fs_call(SYS_GETC, 0, 0, 0);
+        if (ch < 0) { sys_yield(); continue; }
+        if (ch == ' ' || ch == '\r' || ch == '\n' || ch == '\t') continue;
+        lo = hex_digit(ch);
+        break;
+    }
+    if (lo < 0) return -1;
+    return (hi << 4) | lo;
+}
+
+static void shell_upload(const char *name, uint32_t size, uint32_t checksum)
+{
+    uint32_t *header = (uint32_t *)APP_BASE;
+    uint8_t *payload = (uint8_t *)(APP_BASE + APP_HEADER_BYTES);
+    uint32_t sum = 0, i;
+    int byte;
+    sys_puts("send hex:\n");
+    for (i = 0; i < size; i++) {
+        byte = receive_hex_byte();
+        if (byte < 0) { sys_puts("bad hex\n"); return; }
+        payload[i] = (uint8_t)byte;
+        sum += (uint32_t)byte;
+    }
+    if (sum != checksum) { sys_puts("checksum mismatch\n"); return; }
+    header[0] = APP_MAGIC;
+    header[1] = size;
+    header[2] = checksum;
+    sys_fs_call(SYS_FS_CREATE, (uint32_t)name, 0, 0); /* duplicate is OK */
+    byte = sys_fs_call(SYS_FS_WRITE, (uint32_t)name, APP_BASE,
+                       APP_HEADER_BYTES + size);
+    sys_puts(byte == (int)(APP_HEADER_BYTES + size) ? "uploaded\n" : "upload failed\n");
+}
+
+static void shell_run(const char *name)
+{
+    uint32_t header[3], size, sum = 0, off, chunk, i;
+    uint8_t extra;
+    uint8_t *app = (uint8_t *)APP_BASE;
+    int got;
+    if (sys_fs_read_at(name, header, sizeof(header), 0) != (int)sizeof(header) ||
+        header[0] != APP_MAGIC) {
+        sys_puts("not an app file\n"); return;
+    }
+    size = header[1];
+    if (size < 4u || size > APP_MAX_BYTES || size > APP_WINDOW_BYTES) {
+        sys_puts("invalid app size\n"); return;
+    }
+    for (off = 0; off < size; off += chunk) {
+        chunk = size - off;
+        if (chunk > 64u) chunk = 64u;
+        got = sys_fs_read_at(name, app + off, chunk, APP_HEADER_BYTES + off);
+        if (got != (int)chunk) { sys_puts("truncated app\n"); return; }
+        for (i = 0; i < chunk; i++) sum += app[off + i];
+    }
+    if (sum != header[2] ||
+        sys_fs_read_at(name, &extra, 1u, APP_HEADER_BYTES + size) != 0) {
+        sys_puts("bad app checksum\n"); return;
+    }
+    sys_puts("running\n");
+    ((void (*)(void))APP_BASE)(); /* trusted M-mode code, same shell task stack */
+    sys_puts("returned\n");
+}
+
 static void shell_command(char *line)
 {
     char buf[64];
@@ -339,6 +458,7 @@ static void shell_command(char *line)
     if (!*cmd) return;
     if (str_eq(cmd, "help")) {
         sys_puts("help ls cat <file> write <file> <text> rm <file>\n");
+        sys_puts("upload <file> <bytes> <sum8> | run <file>\n");
     } else if (str_eq(cmd, "ls")) {
         sys_fs_call(SYS_FS_LIST, 0, 0, 0);
     } else if (str_eq(cmd, "cat")) {
@@ -365,6 +485,22 @@ static void shell_command(char *line)
         if (!*name) { sys_puts("usage: rm <file>\n"); return; }
         n = sys_fs_call(SYS_FS_DELETE, (uint32_t)name, 0, 0);
         sys_puts(n == 0 ? "removed\n" : "file not found\n");
+    } else if (str_eq(cmd, "upload")) {
+        uint32_t size, checksum;
+        char *bytes, *sum;
+        name = word(&p);
+        bytes = word(&p);
+        sum = word(&p);
+        if (!*name || !parse_size(bytes, &size) ||
+            !parse_checksum(sum, &checksum)) {
+            sys_puts("usage: upload <file> <bytes> <8-hex-digit-sum>\n");
+            return;
+        }
+        shell_upload(name, size, checksum);
+    } else if (str_eq(cmd, "run")) {
+        name = word(&p);
+        if (!*name) { sys_puts("usage: run <file>\n"); return; }
+        shell_run(name);
     } else {
         sys_puts("unknown command (help)\n");
     }

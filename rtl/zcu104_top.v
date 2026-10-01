@@ -50,7 +50,7 @@ module zcu104_top #(
     wire [7:0] rx_data;
     wire [31:0] pc;
 
-    rv32_soc #(.MEM_WORDS(SHELL_MODE ? 4096 : 2048), .MEM_HEX(MEM_HEX)) soc (
+    rv32_soc #(.MEM_WORDS(SHELL_MODE ? 8192 : 2048), .MEM_HEX(MEM_HEX)) soc (
         .clk(cpu_clk), .rst(rst), .uart_tx_ready(ready),
         .uart_tx_data(data), .uart_tx_valid(valid),
         .uart_rx_data(rx_data), .uart_rx_valid(rx_valid), .debug_pc(pc)
