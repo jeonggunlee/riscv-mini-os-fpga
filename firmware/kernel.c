@@ -27,8 +27,8 @@ typedef unsigned char uint8_t;
 
 #define UART_TX      (*(volatile uint8_t  *)0x10000000u)    /* write-only. UART_TX is a byte-wide register, so the compiler must not generate 32-bit writes. */
 #define UART_READY   (*(volatile uint32_t *)0x10000004u)    /* read-only. UART_READY is a 32-bit register, so the compiler must not generate 8-bit reads. */
-#define UART_RX_DATA (*(volatile uint32_t *)0x10000008u)
-#define UART_RX_READY (*(volatile uint32_t *)0x1000000cu)
+#define UART_RX_DATA (*(volatile uint32_t *)0x10000008u)    /* read-only. UART_RX_DATA is a 32-bit register, so the compiler must not generate 8-bit reads. */
+#define UART_RX_READY (*(volatile uint32_t *)0x1000000cu)   /* read-only. UART_RX_READY is a 32-bit register, so the compiler must not generate 8-bit reads. */
 #define MTIME_LO     (*(volatile uint32_t *)0x10001000u)    /* read-only. Only the low 32 bits of the 64-bit timer are memory-mapped. */
 #define MTIMECMP_LO  (*(volatile uint32_t *)0x10001004u)    /* read/write. Only the low 32 bits of the 64-bit timer are memory-mapped. */
 
@@ -73,7 +73,8 @@ static int cur;                      /* slot currently running */
 static volatile uint32_t ticks;      /* timer interrupts so far */
 
 /* ------------------------------------------------------------------ CSR */
-
+// Read/write the machine-mode CSRs we use. 
+// The compiler must not generate any other instructions that read or write these CSRs, so we use inline assembly with the "volatile" modifier.
 static inline uint32_t csr_read_mcause(void)
 {
     uint32_t v;
@@ -81,26 +82,33 @@ static inline uint32_t csr_read_mcause(void)
     return v;
 }
 
+// Write a value to the machine-mode interrupt-enable CSR (mie).
 static inline void csr_write_mie(uint32_t v)
 {
     __asm__ volatile ("csrw mie, %0" : : "r"(v));
 }
 
+// Set the machine-mode interrupt-enable bit (MIE) in the machine-status CSR (mstatus).
 static inline void csr_set_mstatus_mie(void)
 {
     __asm__ volatile ("csrsi mstatus, 0x8");
 }
 
 /* ----------------------------------------------------------------- UART */
-
+// Write a character to the UART. Wait until the transmitter is ready.
 static void uart_putc_raw(char c)
 {
+    // UART_READY is a 32-bit register, so the compiler must not generate 8-bit reads. 
+    // The least-significant bit of UART_READY is 1 when the transmitter is ready to accept a new byte. 
+    // We wait until that bit is set before writing to UART_TX.
     while ((UART_READY & 1u) == 0u) {
         /* transmitter busy */
     }
+    // UART_TX is a byte-wide register, so the compiler must not generate 32-bit writes.
     UART_TX = (uint8_t)c;
 }
 
+// Write a character to the UART. In SHELL_MODE, convert LF to CR+LF for proper terminal behavior.
 static void uart_putc(char c)
 {
 #ifdef SHELL_MODE
@@ -110,6 +118,7 @@ static void uart_putc(char c)
     uart_putc_raw(c);
 }
 
+// Write a null-terminated string to the UART.
 static void uart_puts(const char *s)
 {
     while (*s != '\0')
@@ -137,14 +146,14 @@ static void uart_put_u32(uint32_t n)
 // This is used by the MiniFS demo to show the contents of the file system.
 static void fs_emit(const char *name, uint32_t size)
 {
-    uart_puts(name);
-    uart_puts("  ");
-    uart_put_u32(size);
-    uart_puts(" bytes\n");
+    uart_puts(name);        // print the file name
+    uart_puts("  ");        // print two spaces
+    uart_put_u32(size);     // print the file size in bytes
+    uart_puts(" bytes\n");  // print " bytes" and a newline
 }
 
 /* ---------------------------------------------------------------- timer */
-
+// Rearm the timer interrupt by setting mtimecmp to mtime + TICK_CYCLES.
 static void timer_rearm(void)
 {
     /* Clears the level IRQ and schedules the next tick in one write. */
@@ -152,7 +161,9 @@ static void timer_rearm(void)
 }
 
 /* ------------------------------------------------------------ scheduler */
-
+// Round-robin scheduler. The current task's frame is saved in task_sp[cur], and the next task's frame is returned. 
+// The next task is chosen in a simple round-robin fashion, wrapping around to 0 after NTASK-1.\
+// Task run -> timer interrupt -> mtvec -> trap.S -> trap_handler() -> schedule() -> next task's frame returned -> trap.S restores next task's frame and returns to it.
 static struct frame *schedule(struct frame *f)
 {
     task_sp[cur] = f;                /* remember where this task's frame is */
@@ -162,21 +173,25 @@ static struct frame *schedule(struct frame *f)
     if (++cur >= NTASK)              /* no '%' : RV32I has no divider and   */
         cur = 0;                     /* libgcc is not linked                 */
 #endif
+    // Return the frame of the next task to run. The trap handler will restore this frame and return to the next task.
+    // trap.S will use the mepc in the frame to set the program counter, and the x[1]..x[31] in the frame to restore the registers.
     return task_sp[cur];
 }
 
+//------------------------------------------------------------ panic
 static void panic(uint32_t cause, uint32_t pc)
 {
-    static const char hex[] = "0123456789abcdef";
+    static const char hex[] = "0123456789abcdef";   // for printing the cause and pc in hex
     int i;
 
-    uart_puts("\nPANIC cause=");
-    for (i = 28; i >= 0; i -= 4)
+    uart_puts("\nPANIC cause=");    // print the cause and pc in hex to the UART
+    for (i = 28; i >= 0; i -= 4)    // print the cause in hex, 8 digits
         uart_putc(hex[(cause >> i) & 0xfu]);
     uart_puts(" pc=");
     for (i = 28; i >= 0; i -= 4)
         uart_putc(hex[(pc >> i) & 0xfu]);
     uart_putc('\n');
+    // Hang here forever. The system is in an unrecoverable state.
     for (;;) {
     }
 }
@@ -184,53 +199,57 @@ static void panic(uint32_t cause, uint32_t pc)
 /* Called from trap.S with the saved frame; returns the frame to resume. */
 struct frame *trap_handler(struct frame *f)
 {
-    uint32_t cause = csr_read_mcause();
+    uint32_t cause = csr_read_mcause(); // read the cause of the trap from the mcause CSR
 
+    // The timer interrupt is level-triggered, so we must rearm the timer before returning to the task. Otherwise, the IRQ will fire again immediately after mret.
     if (cause == CAUSE_MTIMER) {
         ticks++;
-        timer_rearm();               /* before mret, or the IRQ re-fires */
-        return schedule(f);
+        timer_rearm();              /* before mret, or the IRQ re-fires */
+        return schedule(f);         // 스케줄러가 선택한 태스크의 frame
     }
 
+    // Handle system calls from tasks. 
+    // The system call number is in a7, and the arguments are in a0-a3. 
+    // The return value is placed in a0.
     if (cause == CAUSE_ECALL_M) {
         f->mepc += 4;                /* resume after the ecall itself */
         switch (REG(f, 17)) {        /* a7 = system call number */
-        case SYS_PUTC:
-            uart_putc((char)REG(f, 10));
-            return f;
-        case SYS_YIELD:
-            return schedule(f);
-        case SYS_GETTICK:
-            REG(f, 10) = ticks;
-            return f;
-        case SYS_FS_CREATE:
-            REG(f, 10) = (uint32_t)fs_create((const char *)REG(f, 10));
-            return f;
-        case SYS_FS_WRITE:
-            REG(f, 10) = (uint32_t)fs_write((const char *)REG(f, 10),
-                (const void *)REG(f, 11), REG(f, 12));
-            return f;
-        case SYS_FS_READ:
-            REG(f, 10) = (uint32_t)fs_read((const char *)REG(f, 10),
-                (void *)REG(f, 11), REG(f, 12));
-            return f;
-        case SYS_FS_DELETE:
-            REG(f, 10) = (uint32_t)fs_delete((const char *)REG(f, 10));
-            return f;
-        case SYS_FS_LIST:
-            fs_list(fs_emit);
-            REG(f, 10) = 0;
-            return f;
-        case SYS_GETC:
-            REG(f, 10) = (UART_RX_READY & 1u) ? UART_RX_DATA & 0xffu : (uint32_t)-1;
-            return f;
-        case SYS_FS_READ_AT:
-            REG(f, 10) = (uint32_t)fs_read_at((const char *)REG(f, 10),
-                (void *)REG(f, 11), REG(f, 12), REG(f, 13));
-            return f;
-        default:
-            REG(f, 10) = (uint32_t)-1;
-            return f;
+            case SYS_PUTC:                      // a0 = byte to print
+                uart_putc((char)REG(f, 10));
+                return f;                       // return to the same task
+            case SYS_YIELD:                     // voluntary yield
+                return schedule(f);             // return to the next task in round-robin order
+            case SYS_GETTICK:                   // return the number of timer ticks since boot
+                REG(f, 10) = ticks;             // place the tick count in a0. ticks is incremented in the timer interrupt handler.
+                return f;
+            case SYS_FS_CREATE:
+                REG(f, 10) = (uint32_t)fs_create((const char *)REG(f, 10)); // a0 = name of the file to create.
+                return f;
+            case SYS_FS_WRITE:
+                REG(f, 10) = (uint32_t)fs_write((const char *)REG(f, 10),   // a0 = name of the file to write to
+                    (const void *)REG(f, 11), REG(f, 12));                  // a1 = pointer to the data to write, a2 = size of the data in bytes
+                return f;
+            case SYS_FS_READ:                                               // a0 = name of the file to read from
+                REG(f, 10) = (uint32_t)fs_read((const char *)REG(f, 10),    // a1 = pointer to the buffer to read into, a2 = capacity of the buffer in bytes
+                    (void *)REG(f, 11), REG(f, 12));
+                return f;
+            case SYS_FS_DELETE:
+                REG(f, 10) = (uint32_t)fs_delete((const char *)REG(f, 10)); // a0 = name of the file to delete.
+                return f;
+            case SYS_FS_LIST:
+                fs_list(fs_emit);       // list all files in the file system, calling fs_emit for each file to print its name and size to the UART.
+                REG(f, 10) = 0;
+                return f;
+            case SYS_GETC:  // nonblocking UART RX; returns -1 if no character is available
+                REG(f, 10) = (UART_RX_READY & 1u) ? UART_RX_DATA & 0xffu : (uint32_t)-1;    // a0 = received character or -1 if no character is available
+                return f;
+            case SYS_FS_READ_AT:
+                REG(f, 10) = (uint32_t)fs_read_at((const char *)REG(f, 10), // a0 = name of the file to read from
+                    (void *)REG(f, 11), REG(f, 12), REG(f, 13));            // a1 = pointer to the buffer to read into, a2 = offset in the file, a3 = number of bytes to read
+                return f;
+            default:
+                REG(f, 10) = (uint32_t)-1;
+                return f;
         }
     }
 
@@ -253,15 +272,24 @@ static void task_exit(void)
  */
 static void task_create(int slot, void (*entry)(void))
 {
-    uint32_t *top = &stacks[slot - 1][STACK_WORDS];
+    uint32_t *top = &stacks[slot - 1][STACK_WORDS];     // top of the task's stack
+    // The stack grows down, so we allocate space for the frame at the top of the stack.
+    // The frame is aligned to 16 bytes, so the compiler can use aligned loads/stores for the frame.
+    // The frame is placed at the top of the stack, and the stack pointer is set to the top of the frame.
+    // The frame is initialized to zero, and the mepc is set to the entry function of the task.
     struct frame *f = (struct frame *)((uint8_t *)top - sizeof(struct frame));
     int i;
 
+    // Clear the frame so that all registers are initialized to 0.
     for (i = 0; i < 31; i++)
         f->x[i] = 0;
+    // Set the initial program counter to the task's entry function.
     f->mepc   = (uint32_t)entry;
+    // Set the return address (ra) to task_exit so that if the task returns, it will go to task_exit.
     REG(f, 1) = (uint32_t)task_exit; /* ra */
+    // Set the stack pointer (sp) to the top of the task's stack.
     REG(f, 2) = (uint32_t)top;       /* sp slot, informational */
+    // Save the initial frame pointer for the task in the task_sp array.
     task_sp[slot] = f;
 }
 

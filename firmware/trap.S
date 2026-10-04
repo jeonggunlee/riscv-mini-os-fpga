@@ -58,6 +58,15 @@ trap_entry:
     csrr t0, mepc                /* save mepc in the frame */
     sw   t0,    0(sp)
 
+    /* 
+       Call trap_handler() in kernel.c, which returns the frame to resume in a0. 
+       If it returns a different task's frame, "mv sp, a0" switches stacks and the restore sequence below reloads that task's registers:
+        --> that single move is the context switch.
+
+        struct frame *trap_handler(struct frame *f)
+
+       * `trap_handler()`가 반환한 frame 포인터는 `a0` 레지스터로 전달되고, `trap.S`는 그 주소를 `sp`에 넣어 복원할 문맥을 선택합니다. 
+    */    
     mv   a0, sp                  /* a0 = frame to resume, which may be the same or a different task */
     call trap_handler            /* <-- trap_handler may return a different task's frame in a0 */
     mv   sp, a0                  /* <-- context switch happens here */

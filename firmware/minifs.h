@@ -4,10 +4,10 @@
 typedef unsigned int fs_u32;
 typedef unsigned char fs_u8;
 
-#define FS_BLOCK_SIZE 512u
-#define FS_BLOCK_COUNT 16u
-#define FS_MAX_FILES 32u
-#define FS_NAME_BYTES 16u
+#define FS_BLOCK_SIZE 512u  // bytes per block
+#define FS_BLOCK_COUNT 16u  // total blocks in the disk image
+#define FS_MAX_FILES 32u    // maximum number of files in the file system
+#define FS_NAME_BYTES 16u   // maximum bytes in a file name (including null terminator)
 
 /* On-disk entry: 24 bytes, little-endian RV32. Empty name[0] means free. */
 struct file_entry {

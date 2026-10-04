@@ -111,6 +111,19 @@ strong { font-weight: 700; }
 a { color: var(--accent); }
 hr { display: none; }
 
+/* Opt-in sentence highlighting: keep <mark class="key-idea"> in the Markdown
+   source so regenerated PDFs retain the author's selection. Inline backgrounds
+   follow wrapped text without changing its font, spacing, or page layout. */
+mark.key-idea {
+    background-color: #ffd3e8;
+    color: inherit;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+    -webkit-box-decoration-break: clone;
+    box-decoration-break: clone;
+}
+mark.key-idea code { background: transparent; }
+
 /* ---- blockquote ---- */
 blockquote {
     margin: 3mm 0 4mm; padding: 3mm 5mm;
@@ -134,6 +147,12 @@ pre {
 pre code { background: none; padding: 0; font-size: inherit; }
 .codehilite { margin: 0; }
 .codehilite pre { margin: 2mm 0 4mm; }
+
+/* Numbered teaching excerpts fit on a page: keep their code together and
+   attach the source caption (and any introduction) to the following block.
+   Existing unmarked code blocks retain their normal pagination behavior. */
+.source-lines, .source-lines pre { break-inside: avoid; }
+p:has(> .source-ref), p:has(+ .source-lines) { break-after: avoid; }
 
 /* ---- tables ---- */
 table {
